@@ -558,6 +558,9 @@ MainWindow::MainWindow(bool has_broken_vulkan)
                 QString::fromStdString(hbl_path),
                 LibraryAppletParameters(0x010000000000100Dull, Service::AM::AppletId::QLaunch));
         }
+    } else {
+        // OOT Remake: no arguments starts Ocarina of Time directly, once the window is up.
+        QTimer::singleShot(0, this, &MainWindow::BootOcarinaOfTime);
     }
 }
 
@@ -3010,6 +3013,30 @@ void MainWindow::OnMenuLoadFile() {
 
     UISettings::values.roms_path = QFileInfo(filename).path().toStdString();
     BootGame(filename, ApplicationAppletParameters());
+}
+
+void MainWindow::BootOcarinaOfTime() {
+    QString path = QString::fromStdString(UISettings::values.oot_game_path);
+    if (path.isEmpty() || !QFileInfo::exists(path)) {
+        QMessageBox::information(
+            this, tr("OOT Remake"),
+            tr("Select your dump of The Legend of Zelda: Ocarina of Time (Switch 2): the game "
+               "file (NSP/XCI) or the 'main' file inside its exefs folder.\n\n"
+               "Your keys and firmware must already be installed."));
+        const QString extensions =
+            QStringLiteral("*.")
+                .append(QtCommon::supported_file_extensions.join(QStringLiteral(" *.")))
+                .append(QStringLiteral(" main"));
+        path = QFileDialog::getOpenFileName(
+            this, tr("Ocarina of Time"), QString::fromStdString(UISettings::values.roms_path),
+            tr("Switch Executable (%1);;All Files (*.*)").arg(extensions));
+        if (path.isEmpty()) {
+            return;
+        }
+        UISettings::values.oot_game_path = path.toStdString();
+        UISettings::values.roms_path = QFileInfo(path).path().toStdString();
+    }
+    BootGame(path, ApplicationAppletParameters());
 }
 
 void MainWindow::OnMenuLoadFolder() {

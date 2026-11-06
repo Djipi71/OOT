@@ -193,6 +193,7 @@ void QtConfig::ReadPathValues() {
     BeginGroup(Settings::TranslateCategory(Settings::Category::Paths));
 
     UISettings::values.roms_path = ReadStringSetting(std::string("romsPath"));
+    UISettings::values.oot_game_path = ReadStringSetting(std::string("ootGamePath"));
     UISettings::values.game_dir_deprecated =
         ReadStringSetting(std::string("gameListRootDir"), std::string("."));
     UISettings::values.game_dir_deprecated_deepscan =
@@ -442,6 +443,7 @@ void QtConfig::SavePathValues() {
     WriteCategory(Settings::Category::Paths);
 
     WriteStringSetting(std::string("romsPath"), UISettings::values.roms_path);
+    WriteStringSetting(std::string("ootGamePath"), UISettings::values.oot_game_path);
     BeginArray(std::string("gamedirs"));
     for (int i = 0; i < UISettings::values.game_dirs.size(); ++i) {
         SetArrayIndex(i);

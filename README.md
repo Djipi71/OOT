@@ -10,6 +10,17 @@
   <img src="dist/branding/lichii_icon_with_logo.png" alt="Lichii" width="600">
 </p>
 
+# OOT Remake
+
+A build of Lichii dedicated to The Legend of Zelda: Ocarina of Time on Switch 2 (program id
+0400486024DEC000). Launched without arguments, `OOT Remake.exe` asks once for your dump (NSP/XCI
+or the exefs `main`) and then boots it directly. The built-in Max Resolution and Dynamic FPS
+patches are applied to build E0F3CCFAF50065AE4EA01EB5AEB13B1A45DA3348. Keys, firmware and the
+game are not included: use your own dump. Windows builds come from the `oot-windows` workflow
+(Actions tab, artifact `OOT-Remake-windows-*`).
+
+Everything below is the upstream Lichii README.
+
 # Lichii
 
 Lichii is an experimental, open-source Nintendo Switch and Switch 2 emulator written in C++. It builds on Eglantine, Eden, yuzu and Sudachi, preserving their contributions while developing this fork's game compatibility and renderer fixes.

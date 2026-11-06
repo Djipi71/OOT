@@ -370,6 +370,7 @@ private slots:
     void OnGameListOpenPerGameProperties(const std::string& file);
     void OnLinkToRyujinx(const u64& program_id);
     void OnMenuLoadFile();
+    void BootOcarinaOfTime();
     void OnMenuLoadFolder();
     void IncrementInstallProgress();
     void OnMenuInstallToNAND();
