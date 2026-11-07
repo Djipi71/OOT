@@ -64,7 +64,7 @@ set(BUILD_AUTO_UPDATE_REPO "zortos293/Lichii")
 if (NIGHTLY_BUILD)
     set(REPO_NAME "Lichii Nightly")
 else()
-    set(REPO_NAME "Lichii")
+    set(REPO_NAME "OOT Remake")
 endif()
 
 set(BUILD_ID ${GIT_REFSPEC})

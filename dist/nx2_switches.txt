@@ -1,9 +1,8 @@
-# Switch NX2 - read when the Lichii GUI starts.
+# Switch NX2 - read when OOT Remake starts.
 # One NAME=VALUE per line. Lines starting with # are ignored.
 # A variable already set in the environment wins over this file.
-# Between files, the user copy (%APPDATA%\eden\nx2_switches.txt, or
-# $XDG_CONFIG_HOME/eden/nx2_switches.txt) wins over this one, so editing this file is never
-# needed: copy the lines you want into your own and restart.
+# Between files, portable\nx2_switches.txt (next to OOT Remake.exe) wins over this one, so
+# editing this file is never needed: copy the lines you want into that one and restart.
 #
 # Restart the emulator after editing.
 

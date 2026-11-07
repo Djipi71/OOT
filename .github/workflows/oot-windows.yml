@@ -96,6 +96,7 @@ jobs:
           -DLICHII_BUILD_TAG=oot-${{ github.run_number }}
           -DLICHII_BUILD_PLATFORM=windows-x86_64
           -DUSE_DISCORD_PRESENCE=OFF
+          -DLICHII_LINK_ICF=OFF
           -DCMAKE_C_COMPILER_LAUNCHER=sccache
           -DCMAKE_CXX_COMPILER_LAUNCHER=sccache
 
