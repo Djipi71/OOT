@@ -14,7 +14,9 @@
 namespace VideoCommon {
 
 inline constexpr u32 OpenGLPipelineCacheVersion = 48;
-inline constexpr u32 VulkanPipelineCacheVersion = 52;
+// 54: #410's storage pointer classifications are recorded in each entry; entries cached before
+// it failed to build with "Uncached storage pointer classification" (objects stayed invisible).
+inline constexpr u32 VulkanPipelineCacheVersion = 54;
 
 // Official Eglantine (cache version 18 at c0cb3325) and this fork (a different version) both
 // used <shader dir>/<title>/vulkan.bin and vulkan_pipelines.bin. Each build deletes a file
