@@ -1853,13 +1853,23 @@ void Maxwell3D::FrontDmaRead(VideoCommon::GpuSplit& split, FrontState& fs, u32 m
             static u64 differences{};
             static u64 report_reads{};
             static std::array<u64, 4> miss_reasons{};
+            // EDEN_NX2_DMA_SNAPSHOT=11 (OOT Remake experiment): compute/copy work sent since the
+            // snapshot no longer counts as writing it; such reads are still drained, re-read and
+            // compared, and differences logged. 12 takes them without that check.
+            static u64 relaxed_hits{};
+            static u64 relaxed_differences{};
+            const bool relaxed = snapshot_mode >= 11;
+            bool relaxed_hit = false;
             const u64 first_page = *device >> 12;
             const u64 last_page = (*device + read_bytes - 1) >> 12;
             bool hit = true;
             for (u64 page = first_page; page <= last_page && hit; ++page) {
                 const auto it = fs.dma_snapshots.find(page);
                 hit = it != fs.dma_snapshots.end() &&
-                      !split.MayBeWrittenSince(it->second, *device, read_bytes);
+                      !split.MayBeWrittenSince(it->second, *device, read_bytes, relaxed);
+                if (hit && relaxed && split.MayBeWrittenSince(it->second, *device, read_bytes)) {
+                    relaxed_hit = true;
+                }
                 if (!hit) {
                     // No snapshot, compute/copy sent since, unranged writer sent since, noted write.
                     const u32 reason = it == fs.dma_snapshots.end()                   ? 0
@@ -1877,13 +1887,19 @@ void Maxwell3D::FrontDmaRead(VideoCommon::GpuSplit& split, FrontState& fs, u32 m
                 if (hit) {
                     ++hits;
                     memory_manager.ReadBlockUnsafe(source, snap_words.data(), read_bytes);
-                    if (snapshot_mode == 10) {
+                    if (relaxed_hit) {
+                        ++relaxed_hits;
+                    }
+                    if (snapshot_mode == 10 || (snapshot_mode == 11 && relaxed_hit)) {
                         split.Drain(VideoCommon::DrainSite::MacroDmaRead);
                         flush_if_dirty();
                         flush_queries(source, read_bytes);
                         std::vector<u32> exact(words);
                         memory_manager.ReadBlockUnsafe(source, exact.data(), read_bytes);
                         if (exact != snap_words) {
+                            if (relaxed_hit) {
+                                ++relaxed_differences;
+                            }
                             if (differences++ < 32) {
                                 LOG_WARNING(HW_GPU,
                                             "DMA snapshot check: macro {:#x} read of {} words at "
@@ -1929,6 +1945,12 @@ void Maxwell3D::FrontDmaRead(VideoCommon::GpuSplit& split, FrontState& fs, u32 m
                              "compute/copy, {} unranged, {} noted write",
                              hits, misses, differences, report_reads, miss_reasons[0],
                              miss_reasons[1], miss_reasons[2], miss_reasons[3]);
+                    if (relaxed) {
+                        LOG_INFO(HW_GPU,
+                                 "DMA snapshot relaxed (mode {}): {} reads past compute/copy, {} "
+                                 "differed",
+                                 snapshot_mode, relaxed_hits, relaxed_differences);
+                    }
                 }
                 for (u32 i = 0; i < words; ++i) {
                     fs.parameters.push_back(snap_words[i]);
