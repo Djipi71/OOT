@@ -1957,9 +1957,17 @@ private:
         bool deadline_reset{};
     } m_frame_trace;
 
-    // timing: present word 12, (swap interval << 16) | refresh rate. Fire Emblem: Fortune's Weave
-    // sends 0x1003c during its boot logos and 0x2003c (two vblanks per frame, 30 fps) after; paced
-    // at every vblank it ran at double speed. EDEN_NX2_SWAP_INTERVAL=<n> forces the interval.
+    /**
+     * Holds this present until the next vblank its word asks for, or for longer when an FPS limit
+     * (the setting, or EDEN_NX2_FPS_LIMIT) is below that rate.
+     *
+     * Fire Emblem: Fortune's Weave sends 0x1003c during its boot logos and 0x2003c (two vblanks
+     * per frame, 30 fps) after; paced at every vblank it ran at double speed.
+     * EDEN_NX2_SWAP_INTERVAL=<n> forces the interval.
+     *
+     * @param timing  Present word 12: (swap interval << 16) | refresh rate.
+     * @param process Owning process, for the Mario Kart World dynamic FPS case; may be null.
+     */
     void PaceToVblank(u32 timing, const Kernel::KProcess* process) {
         Common::Nx2Timeline::Span timeline_span{"present: pace to vblank"};
         const bool trace = Common::DkbFrameTrace::Enabled();
@@ -2002,16 +2010,27 @@ private:
             m_frame_trace.refresh = refresh_rate;
             m_frame_trace.forced = forced_interval;
         }
-        if (!Settings::values.use_speed_limit.GetValue() || Settings::SpeedLimit() == 0) {
+        static const u32 forced_fps_limit = [] {
+            const char* value = std::getenv("EDEN_NX2_FPS_LIMIT");
+            return value ? static_cast<u32>(std::strtoul(value, nullptr, 10)) : 0U;
+        }();
+        const u32 fps_limit =
+            forced_fps_limit != 0 ? forced_fps_limit : Settings::values.fps_limit.GetValue();
+        const bool speed_limited =
+            Settings::values.use_speed_limit.GetValue() && Settings::SpeedLimit() != 0;
+        if (!speed_limited && fps_limit == 0) {
             VideoCommon::Nx2Perf::g_guest_frame_interval_ns.store(0, std::memory_order_relaxed);
             return;
         }
         if (timing != std::exchange(m_swap_word, timing)) {
-            LOG_INFO(Service, "nx2:vi2 present #{} swap interval {} at {} Hz (word 12 = {:#x})",
-                     m_presents, swap_interval, refresh_rate, timing);
+            LOG_INFO(Service,
+                     "nx2:vi2 present #{} swap interval {} at {} Hz, FPS limit {} (word 12 = {:#x})",
+                     m_presents, swap_interval, refresh_rate, fps_limit, timing);
         }
-        auto interval = std::chrono::nanoseconds{
-            100'000'000'000LL * swap_interval / refresh_rate / Settings::SpeedLimit()};
+        const auto vblank_interval = std::chrono::nanoseconds{
+            100'000'000'000LL * swap_interval / refresh_rate /
+            (speed_limited ? Settings::SpeedLimit() : 100)};
+        auto interval = PacedInterval(vblank_interval, fps_limit);
         // Genlock: with the host frame pacer on, a frame period within 1% of a whole number of
         // display refreshes becomes exactly that many measured refreshes (a "120 Hz" display at
         // 119.98 Hz: 33.3389 ms instead of 33.3333). On the game's own clock its frames drifted
