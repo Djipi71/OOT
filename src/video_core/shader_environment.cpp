@@ -267,7 +267,9 @@ size_t GenericEnvironment::ReadSizeBytes() const noexcept {
 }
 
 bool GenericEnvironment::CanBeSerialized() const noexcept {
-    return !has_unbound_instructions && (!lowered_native || lowered_native->trap_prefix.empty());
+    // A trap guard is checked against live constants on every dispatch (ComputeShader), so a
+    // cached pipeline is only used once its guard passes (zortos293/Lichii#192, SinCuri0).
+    return !has_unbound_instructions;
 }
 
 bool GenericEnvironment::HasNativeInstructions() const {
@@ -345,6 +347,7 @@ void GenericEnvironment::Serialize(std::ofstream& file) const {
                        sizeof(gp_passthrough_mask));
         }
         if (stage == Shader::Stage::Task || stage == Shader::Stage::Mesh) {
+            // Task and mesh programs are translated with these (none were stored before).
             file.write(reinterpret_cast<const char*>(&mesh_registers), sizeof(mesh_registers))
                 .write(reinterpret_cast<const char*>(&mesh_primitive_header),
                        sizeof(mesh_primitive_header));
@@ -1123,16 +1126,6 @@ void FileEnvironment::Deserialize(std::ifstream& file) {
     }
     // Native programs fold bank 1 reads as they did when they were built.
     is_proprietary_driver = texture_bound == 2 || Shader::Ampere::HasNativeAddressMap(code);
-}
-
-size_t FileEnvironment::MemorySize() const {
-    const auto map_bytes = [](const auto& map) {
-        return (map.bucket_count() + 1) *
-               (sizeof(typename std::decay_t<decltype(map)>::value_type) + 2);
-    };
-    return sizeof(*this) + code.capacity() * sizeof(u64) + map_bytes(texture_types) +
-           map_bytes(texture_pixel_formats) + map_bytes(cbuf_values) +
-           map_bytes(storage_pointer_types) + map_bytes(cbuf_replacements);
 }
 
 void FileEnvironment::Dump(u64 pipeline_hash, u64 shader_hash) {

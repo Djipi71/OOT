@@ -9,7 +9,6 @@
 #include <atomic>
 #include <functional>
 #include <memory>
-#include <string>
 
 #include "common/common_funcs.h"
 #include "common/common_types.h"
@@ -23,12 +22,6 @@ class GraphicsContext;
 } // namespace Core::Frontend
 
 namespace VideoCore {
-
-struct RendererDeviceInfo {
-    std::string model;
-    std::string driver;
-    std::string api;
-};
 
 struct RendererSettings {
     // Screenshot
@@ -57,10 +50,6 @@ public:
     [[nodiscard]] virtual RasterizerInterface* ReadRasterizer() = 0;
 
     [[nodiscard]] virtual std::string GetDeviceVendor() const = 0;
-
-    [[nodiscard]] const RendererDeviceInfo& GetDeviceInfo() const {
-        return device_info;
-    }
 
     // Getter/setter functions:
     // ------------------------
@@ -116,7 +105,6 @@ protected:
     int m_current_frame = 0;  ///< Current frame, should be set by the renderer
 
     RendererSettings renderer_settings;
-    RendererDeviceInfo device_info;
 
 private:
     /// Updates the framebuffer layout of the contained render window handle.

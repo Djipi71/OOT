@@ -5,11 +5,8 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 
 add_executable(tests
-    common/addon_config.cpp
-    video_core/buffer_cache_ports.cpp
     video_core/unswizzle_workers.cpp
     video_core/aftermath_dump.cpp
-    video_core/frame_dump_schedule.cpp
     video_core/gpu_timestamp.cpp
     core/nx2_streamplay.cpp
     core/nx2_video_ready.cpp
@@ -40,8 +37,10 @@ add_executable(tests
     video_core/storage_buffer_control_flow.cpp
     core/nup_validation.cpp
     input_common/calibration_lifetime.cpp
+    input_common/tas_input.cpp
     video_core/ampere_logged_numeric.cpp
     video_core/ampere_logged_textures.cpp
+    video_core/oot_visual_workaround.cpp
     video_core/native_texture_header_index.cpp
     video_core/texture_handles.cpp
     video_core/ampere_selevet_modes.cpp
@@ -59,17 +58,16 @@ add_executable(tests
     video_core/async_draw_policy.cpp
     video_core/async_shader_emission.cpp
     video_core/pipeline_build.cpp
+    video_core/spirv_storage_alignment.cpp
     video_core/pipeline_optimization.cpp
     video_core/spirv_atomic_retry.cpp
-    video_core/spirv_storage_alignment.cpp
     video_core/spirv_fragment_shuffle.cpp
     video_core/multi_range_refresh.cpp
     video_core/command_fetch_order.cpp
-    video_core/command_writer.cpp
-    video_core/split_fence_wait.cpp
     video_core/command_snapshot_suspensions.cpp
     video_core/pending_maps.cpp
     video_core/maxwell_fast_method.cpp
+    video_core/split_write_tracker.cpp
     hid_core/sensor_info.cpp
     common/paged_scalar.cpp
     common/queue_lifetime.cpp
@@ -138,6 +136,7 @@ add_executable(tests
     video_core/ampere_bindless_surfaces.cpp
     video_core/native_macro_fifo.cpp
     video_core/uniform_stream_reuse.cpp
+    video_core/usage_tracker.cpp
     video_core/shader_invalidation.cpp
     video_core/descriptor_table.cpp
     video_core/global_address_tracking.cpp
@@ -152,7 +151,7 @@ add_executable(tests
 
 create_target_directory_groups(tests)
 
-target_link_libraries(tests PRIVATE common core audio_core input_common video_core frontend_common)
+target_link_libraries(tests PRIVATE common core audio_core input_common video_core)
 target_link_libraries(tests PRIVATE ${PLATFORM_LIBRARIES} Catch2::Catch2WithMain Threads::Threads)
 
 if (TARGET dynarmic::dynarmic)
@@ -172,15 +171,6 @@ add_executable(update_checker_tests
     ../frontend_common/update_checker.cpp)
 target_link_libraries(update_checker_tests PRIVATE common Catch2::Catch2WithMain)
 add_test(NAME update_checker_tests COMMAND update_checker_tests)
-
-if (NOT ANDROID)
-    add_executable(config_tests
-        common/first_run_config.cpp
-        ../frontend_common/config.cpp)
-    target_link_libraries(config_tests PRIVATE common SimpleIni::SimpleIni Catch2::Catch2WithMain
-        ${PLATFORM_LIBRARIES})
-    add_test(NAME config_tests COMMAND config_tests)
-endif()
 
 # needed for vma
 if (NOT MSVC)
