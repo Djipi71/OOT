@@ -91,6 +91,9 @@ inline void LoadExperiments() {
         // EXP9 = 1: native uniform bank pages compared only when they may have changed (verified
         // with EXP9=2: 0 missed in 120 s walking). Idle 54.5 -> 57.7 fps, walking 56.6 -> 58.9.
         g_experiments[9].store(1, std::memory_order_relaxed);
+        // EXP14: unchanged macro register writes dropped before FrontWrite's other checks.
+        // Castle Town, profile toggle: front macro 250 -> 236 ms/s, push 77 -> 70 ms/s.
+        g_experiments[14].store(1, std::memory_order_relaxed);
         for (int n = 0; n < ExperimentCount; ++n) {
             const std::string name = "EDEN_NX2_EXP" + std::to_string(n);
             if (const char* value = std::getenv(name.c_str())) {
