@@ -132,7 +132,8 @@ jobs:
           if (-not (Test-Path "build/release/bin/OOT Remake.exe")) {
             throw "OOT Remake.exe was not produced"
           }
-          windeployqt --release --no-translations "build/release/bin/OOT Remake.exe"
+          windeployqt --release --no-translations --no-compiler-runtime "build/release/bin/OOT Remake.exe"
+          Remove-Item -ErrorAction SilentlyContinue "build/release/bin/vc_redist*.exe"
 
       - name: Upload
         uses: actions/upload-artifact@v7

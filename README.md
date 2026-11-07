@@ -20,7 +20,11 @@ game are not included: use your own dump.
 
 The build is always portable: all data (config, keys, firmware/NAND, saves, shader cache, logs)
 lives in the `portable` folder next to `OOT Remake.exe`, created on first launch. Put
-`prod.keys` and `title.keys` in `portable\keys`. Windows builds come from the `oot-windows` workflow
+`prod.keys` and `title.keys` in `portable\keys`.
+
+Windows needs the Microsoft Visual C++ 2015-2022 Redistributable (x64). It is not bundled: if
+`OOT Remake.exe` reports a missing `MSVCP140.dll` or `VCRUNTIME140.dll`, install it from
+https://aka.ms/vs/17/release/vc_redist.x64.exe. Windows builds come from the `oot-windows` workflow
 (Actions tab, artifact `OOT-Remake-windows-*`).
 
 Djipi builds are based on [Lichii](https://github.com/zortos293/Lichii) (zortos293),
