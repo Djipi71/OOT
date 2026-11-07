@@ -1237,7 +1237,8 @@ bool FileEnvironment::IsCbufStorageBufferPointer(u32 index, u32 offset) {
         if (guess) {
             return index == 0 ? guess->storage_pointer_bank0 : guess->storage_pointer_other;
         }
-        throw Shader::LogicError("Uncached storage pointer classification");
+        throw Shader::LogicError("Uncached storage pointer classification c{}[{:#x}]", index,
+                                 offset);
     }
     return it->second != 0;
 }
@@ -1249,7 +1250,8 @@ bool FileEnvironment::IsCbufIndirectStorageBufferPointer(u32 index, u32 offset, 
         if (guess) {
             return index == 0 ? guess->storage_pointer_bank0 : guess->storage_pointer_other;
         }
-        throw Shader::LogicError("Uncached storage pointer table classification");
+        throw Shader::LogicError("Uncached storage pointer table classification c{}[{:#x}]+{:#x}",
+                                 index, offset, indirect);
     }
     return it->second != 0;
 }
