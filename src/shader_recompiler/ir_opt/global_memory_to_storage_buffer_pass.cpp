@@ -4,6 +4,7 @@
 // SPDX-FileCopyrightText: Copyright 2021 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <cstdlib>
 #include <algorithm>
 #include <array>
 #include <bit>
@@ -1607,7 +1608,12 @@ void GlobalMemoryToStorageBufferPass(Environment& env, IR::Program& program,
     TrackingConditions conditions{program};
     StorageInfo info;
     // Without 64-bit integers the backend cannot route global accesses among bound buffers.
-    info.bind_competing_loaded = host_info.support_int64;
+    // EDEN_DJIPI_NO_410=1 (A/B): keep paired pointers only, as before #410.
+    static const bool no_410 = [] {
+        const char* value = std::getenv("EDEN_DJIPI_NO_410");
+        return value != nullptr && value[0] == '1';
+    }();
+    info.bind_competing_loaded = host_info.support_int64 && !no_410;
     info.iterator_words = CollectIteratorWords(program);
     info.atomic_pointers = CollectAtomicPointers(program);
     const auto collect = [&] {

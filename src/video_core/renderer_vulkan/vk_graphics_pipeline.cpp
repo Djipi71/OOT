@@ -397,6 +397,14 @@ GraphicsPipeline::GraphicsPipeline(
         color_output_mask |= u32{stage_infos[NUM_STAGES - 1].frag_color_components[rt]}
                              << (rt * 4);
     }
+    // EDEN_DJIPI_NO_353=1 (A/B): write every component, as before #353.
+    static const bool no_353 = [] {
+        const char* value = std::getenv("EDEN_DJIPI_NO_353");
+        return value != nullptr && value[0] == '1';
+    }();
+    if (no_353) {
+        color_output_mask = ~0U;
+    }
     const auto any_written = [](const auto& descriptors) {
         return std::ranges::any_of(descriptors, [](const auto& desc) { return desc.is_written; });
     };
