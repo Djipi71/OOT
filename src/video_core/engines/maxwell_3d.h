@@ -3438,6 +3438,10 @@ private:
     void FinishFrontMacro(Core::System& system);
     std::unique_ptr<FrontState> front;
     bool front_macros{};
+    // EDEN_NX2_SKIP_SAME and EDEN_NX2_PERF_VERIFY, read in the constructor (after the switch
+    // files are loaded): every method checks them, so no static guard on the hot path.
+    bool skip_same_value_writes{true};
+    bool perf_verify{};
     // EDEN_NX2_SPLIT_VERIFY: the last SET_SHADOW_RAM_CONTROL writes each side saw (argument,
     // mode before, path), printed when the sides disagree.
     struct ControlWrite {

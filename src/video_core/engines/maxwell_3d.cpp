@@ -75,6 +75,9 @@ Maxwell3D::Maxwell3D(MemoryManager& memory_manager_)
     }
     fast_maxwell3d = VideoCommon::Nx2Perf::On(VideoCommon::Nx2Perf::Opt::Method) && !record_write_history &&
                      !g_trace_first_method_writes && !VideoCommon::Nx2Profile::Enabled();
+    const char* skip_same = std::getenv("EDEN_NX2_SKIP_SAME");
+    skip_same_value_writes = skip_same == nullptr || skip_same[0] != '0';
+    perf_verify = VideoCommon::Nx2Perf::Verify();
 }
 
 Maxwell3D::~Maxwell3D() = default;
@@ -2209,7 +2212,7 @@ bool Maxwell3D::FrontDmaReadEarly(VideoCommon::GpuSplit& split, FrontState& fs, 
     for (u32 i = 0; i < words; ++i) {
         read[i] = memory_manager.Read<u32>(source + u64{i} * sizeof(u32));
     }
-    if (VideoCommon::Nx2Perf::Verify()) {
+    if (perf_verify) {
         // The old path: drain, flush, read again. Its words are the ones used.
         split.Drain(VideoCommon::DrainSite::MacroDmaRead);
         if (memory_manager.IsMemoryDirty(source, bytes, VideoCommon::CacheType::BufferCache)) {
