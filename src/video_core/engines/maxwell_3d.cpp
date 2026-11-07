@@ -4,6 +4,7 @@
 // SPDX-FileCopyrightText: Copyright 2018 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <cstdlib>
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -872,6 +873,16 @@ void Maxwell3D::ProcessQueryGet() {
 }
 
 void Maxwell3D::ProcessQueryCondition() {
+    // EDEN_DJIPI_ALWAYS_RENDER=1 (A/B): ignore render conditions (occlusion predicates), so every
+    // conditional draw runs. Ocarina's stone tablet by Zora's River is never drawn otherwise.
+    static const bool always_render = [] {
+        const char* value = std::getenv("EDEN_DJIPI_ALWAYS_RENDER");
+        return value != nullptr && value[0] == '1';
+    }();
+    if (always_render) {
+        execute_on = true;
+        return;
+    }
     if (rasterizer->AccelerateConditionalRendering()) {
         execute_on = true;
         return;
