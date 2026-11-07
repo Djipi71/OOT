@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <memory>
@@ -497,6 +498,12 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func, bool is_in
     if (Profile::Scope scope{Profile::Zone::Configure}; !pipeline->Configure(is_indexed)) {
         report_failure("configure failed");
         TraceRenderState(is_indexed, "configure-failed", nullptr);
+        return;
+    }
+    // EDEN_DJIPI_APPLY_PENDING=1 (experiment): a draw whose buffers hold guest CPU writes not yet
+    // applied (they land at the next fence) applies them now and binds its buffers again.
+    if (ApplyPendingCpuWrites(false) && !pipeline->Configure(is_indexed)) {
+        report_failure("configure failed");
         return;
     }
 
@@ -2148,6 +2155,34 @@ void RasterizerVulkan::TraceRenderState(bool is_indexed, const char* outcome,
     LOG_DEBUG(Render_Vulkan, "Render trace condition: address={:#x} mode={} override={}",
               regs.render_enable.Address(), static_cast<u32>(regs.render_enable.mode),
               static_cast<u32>(regs.render_enable_override));
+}
+
+bool RasterizerVulkan::ApplyPendingCpuWrites(bool compute) {
+    static const bool enabled = [] {
+        const char* value = std::getenv("EDEN_DJIPI_APPLY_PENDING");
+        return value != nullptr && value[0] == '1';
+    }();
+    if (!enabled) {
+        return false;
+    }
+    bool pending = false;
+    buffer_cache.ForEachBoundBuffer(compute, [&](u32, bool, u32, bool, const auto& binding,
+                                                 u32 bound_size, const auto*, u32) {
+        if (!pending && binding.device_addr != 0 &&
+            gpu.HasPendingCPUWrites(binding.device_addr, bound_size)) {
+            pending = true;
+        }
+    });
+    if (!pending) {
+        return false;
+    }
+    static std::atomic<u64> applied{};
+    if (const u64 count = ++applied; (count & (count - 1)) == 0) {
+        LOG_INFO(HW_GPU, "EDEN_DJIPI_APPLY_PENDING: applied pending CPU writes before {} draws",
+                 count);
+    }
+    gpu.InvalidateGPUCache();
+    return true;
 }
 
 void RasterizerVulkan::TracePendingCpuWrites(bool compute, std::span<const u64> shader_hashes) {
