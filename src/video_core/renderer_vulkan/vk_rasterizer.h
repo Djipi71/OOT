@@ -253,8 +253,6 @@ private:
     bool FrameDumpBuffers(bool compute, std::span<const u64> shader_hashes);
     /// EDEN_NX2_PENDING_WRITE_TRACE: logs bound buffer ranges with collected, unapplied CPU writes.
     void TracePendingCpuWrites(bool compute, std::span<const u64> shader_hashes);
-    /// EDEN_DJIPI_APPLY_PENDING: applies pending guest CPU writes the bound buffers overlap.
-    bool ApplyPendingCpuWrites(bool compute);
 
     Tegra::GPU& gpu;
     Tegra::MaxwellDeviceMemoryManager& device_memory;
