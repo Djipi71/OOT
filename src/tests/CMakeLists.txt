@@ -93,19 +93,25 @@ add_executable(tests
     video_core/ampere_matrix.cpp
     video_core/spirv_software_matrix.cpp
     video_core/spirv_builtin_capabilities.cpp
+    video_core/spirv_min_max_denorms.cpp
     common/bit_field.cpp
     common/cityhash.cpp
     common/container_hash.cpp
     common/event.cpp
     common/fibers.cpp
+    common/fs_iterate.cpp
     common/game_presets.cpp
     common/host_memory.cpp
+    common/host_memory_failure.cpp
+    common/host_memory_test_access.h
+    core/host_memory_failure.cpp
     common/page_table.cpp
     common/param_package.cpp
     common/range_map.cpp
     common/ring_buffer.cpp
     common/scratch_buffer.cpp
     common/slot_vector.cpp
+    common/sparse_large_vector.cpp
     common/undefined_fix.cpp
     common/unique_function.cpp
     common/zstd_compression.cpp
@@ -135,11 +141,13 @@ add_executable(tests
     video_core/ampere_uniform_immediate_shift.cpp
     video_core/ampere_bindless_surfaces.cpp
     video_core/native_macro_fifo.cpp
+    video_core/turing_macro_ram.cpp
     video_core/uniform_stream_reuse.cpp
     video_core/usage_tracker.cpp
     video_core/shader_invalidation.cpp
     video_core/descriptor_table.cpp
     video_core/global_address_tracking.cpp
+    video_core/global_atomic_routing.cpp
     video_core/nvn_storage_descriptor.cpp
     video_core/ampere_f2i.cpp
     video_core/ampere_ldc.cpp
@@ -160,6 +168,12 @@ if (TARGET dynarmic::dynarmic)
 endif()
 
 add_test(NAME tests COMMAND tests)
+
+if (TARGET SDL3::SDL3)
+    add_executable(sdl_window_state_tests yuzu_cmd/sdl_window_state.cpp)
+    target_link_libraries(sdl_window_state_tests PRIVATE SDL3::SDL3 Catch2::Catch2WithMain)
+    add_test(NAME sdl_window_state_tests COMMAND sdl_window_state_tests)
+endif()
 
 if (WIN32 AND ARCHITECTURE_x86_64)
     add_executable(event_wait_probe ../../tools/nx2/event_wait_probe.cpp)
