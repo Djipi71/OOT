@@ -9,7 +9,7 @@
 // yuzu data directories
 
 #define EDEN_DIR "eden"
-#define PORTABLE_DIR "user"
+#define PORTABLE_DIR "portable"
 
 // Sub-directories contained within a yuzu data directory
 #define AMIIBO_DIR "amiibo"

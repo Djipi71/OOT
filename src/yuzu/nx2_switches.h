@@ -16,7 +16,7 @@
 // set. nx2_switches.txt holds "NAME=VALUE" lines, one per line, '#' comments. A variable already
 // in the real environment always wins, so a launcher script can still override one run; between
 // files the later one wins, so the copy next to the executable (shipped with the build) can be
-// overridden by %APPDATA%\eden\nx2_switches.txt without editing the one that gets replaced.
+// overridden by portable\nx2_switches.txt without editing the one that gets replaced.
 static void ParseSwitchFile(const std::filesystem::path& path,
                             std::map<std::string, std::string>& entries) {
     std::ifstream file{path};
@@ -91,13 +91,9 @@ static void LoadNx2Switches(const char* argv0) {
                  name == "EGLANTINE_EXPERIMENTAL_STATIC_VERTEX_REPACK" ||
                  name == "EGLANTINE_TEST_VERTEX_REPACK");
     });
-#ifdef _WIN32
-    const auto config_base = Common::FS::GetAppDataRoamingDirectory();
-#else
-    const auto config_base = Common::FS::GetDataDirectory("XDG_CONFIG_HOME");
-#endif
-    if (config_base.is_absolute()) {
-        ParseSwitchFile(config_base / EDEN_DIR / "nx2_switches.txt", entries);
+    const auto& user_dir = Common::FS::GetEdenPath(Common::FS::EdenPath::EdenDir);
+    if (user_dir.is_absolute()) {
+        ParseSwitchFile(user_dir / "nx2_switches.txt", entries);
     }
     for (const auto& [name, value] : entries) {
         if (std::getenv(name.c_str()) != nullptr) {

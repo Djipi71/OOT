@@ -112,11 +112,10 @@ public:
         fs::path eden_path_cache;
         fs::path eden_path_config;
 #ifdef _WIN32
-        // User directory takes priority over global %AppData% directory
+        // OOT Remake is always portable: everything lives in "portable" next to the executable.
         eden_path = GetExeDirectory() / PORTABLE_DIR;
-        if (!Exists(eden_path) || !IsDir(eden_path)) {
-            eden_path = GetAppDataRoamingDirectory() / EDEN_DIR;
-        }
+        std::error_code ec;
+        fs::create_directories(eden_path, ec);
         eden_path_cache = eden_path / CACHE_DIR;
         eden_path_config = eden_path / CONFIG_DIR;
 #define LEGACY_PATH(titleName, upperName) GenerateLegacyPath(EmuPath::titleName##Dir, GetAppDataRoamingDirectory() / upperName##_DIR); \
@@ -133,6 +132,8 @@ public:
         eden_path_config = eden_path / CONFIG_DIR;
 #else
         eden_path = GetCurrentDir() / PORTABLE_DIR;
+        std::error_code ec;
+        fs::create_directories(eden_path, ec);
         if (!Exists(eden_path) || !IsDir(eden_path)) {
             eden_path = GetDataDirectory("XDG_DATA_HOME") / EDEN_DIR;
             eden_path_cache = GetDataDirectory("XDG_CACHE_HOME") / EDEN_DIR;
