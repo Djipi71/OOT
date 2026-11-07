@@ -374,9 +374,21 @@ bool Puller::CanResumeAcquire(DmaPusher& dma_pusher) {
         // was last drained for this acquire. A release the back holds as deferred work lands only
         // when the back runs, so a channel polled without ever draining again waited forever
         // (Mario Kart World hung after 63 s once the 2 s report had been made).
+        // EDEN_NX2_ACQUIRE_POLLS / EDEN_NX2_ACQUIRE_POLL_US (OOT Remake experiment): the poll
+        // count and time between those drains (defaults 16 and 1000 us).
+        static const u32 poll_count = [] {
+            const char* value = std::getenv("EDEN_NX2_ACQUIRE_POLLS");
+            const long parsed = value != nullptr ? std::strtol(value, nullptr, 10) : 0;
+            return parsed > 0 ? static_cast<u32>(parsed) : 16U;
+        }();
+        static const std::chrono::microseconds poll_window = [] {
+            const char* value = std::getenv("EDEN_NX2_ACQUIRE_POLL_US");
+            const long parsed = value != nullptr ? std::strtol(value, nullptr, 10) : 0;
+            return std::chrono::microseconds{parsed > 0 ? parsed : 1000};
+        }();
         const auto now = std::chrono::steady_clock::now();
-        if (++pending_acquire->unmet_polls % 16 != 0 &&
-            now - pending_acquire->last_drain < std::chrono::milliseconds{1}) {
+        if (++pending_acquire->unmet_polls % poll_count != 0 &&
+            now - pending_acquire->last_drain < poll_window) {
             VideoCommon::Nx2Profile::Add(VideoCommon::Nx2Profile::Counter::AcquirePollsFast, 1);
             return false;
         }
