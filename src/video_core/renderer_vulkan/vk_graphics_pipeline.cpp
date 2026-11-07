@@ -628,7 +628,11 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
                 // The program's storage offsets are relative to the buffer address aligned down
                 // to the host storage alignment (StorageOffset). EDEN_NX2_HANDLE_ALIGN=1 reads
                 // the words there instead of at the unaligned address.
-                static const bool align_storage{std::getenv("EDEN_NX2_HANDLE_ALIGN") != nullptr};
+                // On by default (zortos293/Lichii#245); EDEN_NX2_HANDLE_ALIGN=0 reads unaligned.
+            static const bool align_storage{[] {
+                const char* value = std::getenv("EDEN_NX2_HANDLE_ALIGN");
+                return value == nullptr || value[0] != '0';
+            }()};
                 const u64 storage_alignment{device.GetStorageBufferAlignment()};
                 const u32 raw{evaluate(align_storage ? storage_alignment : 1)};
                 if (raw == 0) {
