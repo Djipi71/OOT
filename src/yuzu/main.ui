@@ -243,7 +243,6 @@
    <addaction name="menu_Emulation"/>
    <addaction name="menu_View"/>
    <addaction name="menu_Tools"/>
-   <addaction name="menu_Multiplayer"/>
    <addaction name="menu_Help"/>
   </widget>
   <action name="action_Install_File_NAND">
