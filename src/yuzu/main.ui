@@ -11,7 +11,7 @@
    </rect>
   </property>
   <property name="windowTitle">
-  <string>Lichii</string>
+  <string>Djipi</string>
   </property>
   <property name="windowIcon">
    <iconset resource="yuzu.qrc">
@@ -59,7 +59,7 @@
     </widget>
     <widget class="QMenu" name="menuOpen_Eden_Folders">
      <property name="title">
-      <string>Open &amp;Lichii Folders</string>
+      <string>Open &amp;Djipi Folders</string>
      </property>
      <addaction name="action_Root_Data_Folder"/>
      <addaction name="action_NAND_Folder"/>
@@ -291,7 +291,7 @@
   </action>
   <action name="action_About">
    <property name="text">
-    <string>&amp;About Lichii</string>
+    <string>&amp;About Djipi</string>
    </property>
   </action>
   <action name="action_Single_Window_Mode">
@@ -554,7 +554,7 @@
   </action>
   <action name="action_Eden_Dependencies">
    <property name="text">
-    <string>&amp;Lichii Dependencies</string>
+    <string>&amp;Djipi Dependencies</string>
    </property>
   </action>
   <action name="action_Data_Manager">

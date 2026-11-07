@@ -172,7 +172,7 @@ std::optional<std::string> MakeRequest(const std::string& url, const std::string
         httplib::Request request{
             .method = "GET",
             .path = path,
-            .headers = {{"Accept", "application/vnd.github+json"}, {"User-Agent", "Lichii"}},
+            .headers = {{"Accept", "application/vnd.github+json"}, {"User-Agent", "Djipi"}},
         };
 
         client->set_follow_location(true);
@@ -205,7 +205,7 @@ std::vector<Release> GetReleases() {
     const auto body = GetReleasesBody();
 
     if (!body) {
-        LOG_WARNING(Common, "Failed to get Lichii releases");
+        LOG_WARNING(Common, "Failed to get Djipi releases");
         return {};
     }
 

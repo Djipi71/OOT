@@ -23,6 +23,10 @@ lives in the `portable` folder next to `OOT Remake.exe`, created on first launch
 `prod.keys` and `title.keys` in `portable\keys`. Windows builds come from the `oot-windows` workflow
 (Actions tab, artifact `OOT-Remake-windows-*`).
 
+Djipi builds are based on [Lichii](https://github.com/zortos293/Lichii) (zortos293),
+[Frizti's fork](https://github.com/Frizti/Lichii), Eglantine, Eden and yuzu, all GPL-3.0; the
+source keeps their copyright notices.
+
 Everything below is the upstream Lichii README.
 
 # Lichii
