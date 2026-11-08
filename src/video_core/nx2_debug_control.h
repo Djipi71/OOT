@@ -94,6 +94,14 @@ inline void LoadExperiments() {
         // EXP14: unchanged macro register writes dropped before FrontWrite's other checks.
         // Castle Town, profile toggle: front macro 250 -> 236 ms/s, push 77 -> 70 ms/s.
         g_experiments[14].store(1, std::memory_order_relaxed);
+        // EXP18 = 4 (exact, zortos293/Lichii#717 wave 1): a buffer touches its LRU node once
+        // per frame; a second touch in the same frame was already a no-op in LruCache::Touch
+        // (its tick is not older), so only the node's cache miss goes. Bits 1 and 2 stay off.
+        g_experiments[18].store(4, std::memory_order_relaxed);
+        // EXP29 = 6: the exact parts of #717's micro bundle (TickWork's lock-free check, native
+        // compute inline uploads not recorded); 1 (memory usage reuse) changes what the caches'
+        // GC sees and stays off.
+        g_experiments[29].store(6, std::memory_order_relaxed);
         for (int n = 0; n < ExperimentCount; ++n) {
             const std::string name = "EDEN_NX2_EXP" + std::to_string(n);
             if (const char* value = std::getenv(name.c_str())) {
