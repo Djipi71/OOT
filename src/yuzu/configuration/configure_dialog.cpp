@@ -80,10 +80,10 @@ ConfigureDialog::ConfigureDialog(QWidget* parent, HotkeyRegistry& registry_,
     ui->tabWidget->addTab(profile_tab.get(), tr("Profiles"));
     ui->tabWidget->addTab(system_tab.get(), tr("System"));
     ui->tabWidget->addTab(ui_tab.get(), tr("Game List"));
-    ui->tabWidget->addTab(web_tab.get(), tr("Web"));
 
     // Not in any tab (no multiplayer), but parented to the dialog: hide it, or it shows through.
     network_tab->hide();
+    web_tab->hide();
 
     web_tab->SetWebServiceConfigEnabled(enable_web_config);
     hotkeys_tab->Populate(registry);
@@ -175,7 +175,7 @@ Q_DECLARE_METATYPE(QList<QWidget*>);
 void ConfigureDialog::PopulateSelectionList() {
     const std::array<std::pair<QString, QList<QWidget*>>, 6> items{
         {{tr("General"),
-          {general_tab.get(), hotkeys_tab.get(), ui_tab.get(), web_tab.get(), debug_tab_tab.get()}},
+          {general_tab.get(), hotkeys_tab.get(), ui_tab.get(), debug_tab_tab.get()}},
          {tr("System"),
           {system_tab.get(), profile_tab.get(), filesystem_tab.get(),
            applets_tab.get()}},

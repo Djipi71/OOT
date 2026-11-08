@@ -67,6 +67,10 @@ void ConfigureGeneral::Setup(const ConfigurationShared::Builder& builder) {
 
     push(UISettings::values.linkage.by_category[Settings::Category::UiGeneral]);
     for (const auto setting : settings) {
+        // OOT Remake ships without the update checker.
+        if (setting->Id() == UISettings::values.check_for_updates.Id()) {
+            continue;
+        }
         auto* widget = builder.BuildWidget(setting, apply_funcs);
 
         if (widget == nullptr) {
