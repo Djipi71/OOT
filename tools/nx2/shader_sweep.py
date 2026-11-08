@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Replay native shader captures and v46-v53 pipeline caches without a GPU."""
+"""Replay native shader captures and v46-v54 pipeline caches without a GPU."""
 
 import argparse
 from collections import Counter, defaultdict
@@ -17,6 +17,7 @@ import sys
 STAGES = ("vertex", "tess-control", "tess-eval", "geometry", "fragment", "compute",
           "vertex-a", "task", "mesh")
 GAMES = {
+    "0400486024dec000": "The Legend of Zelda: Ocarina of Time",
     "040074a01bf12000": "Donkey Kong Bananza",
     "040077201be50000": "Kirby Air Riders",
     "04007c6028aa8000": "Yoshi demo",
@@ -51,7 +52,7 @@ def parse_cache(data):
     if len(data) < 12 or data[:8] != b"yuzucach":
         raise CacheError("not a serialized shader-environment cache")
     version, = struct.unpack_from("<I", data, 8)
-    if version not in (46, 47, 48, 49, 50, 51, 52, 53):
+    if version not in (46, 47, 48, 49, 50, 51, 52, 53, 54):
         raise CacheError(f"unsupported cache version {version}")
     cursor = 12
     entry = 0
@@ -196,7 +197,7 @@ def main():
             if row.get("kind") == "native" and "env" in row:
                 prior_contexts[row["native_id"]].append(row)
     for path in files:
-        if not re.fullmatch(r"vulkan(?:\.fork-v\d+)?\.bin", path.name):
+        if not re.fullmatch(r"vulkan(?:-[a-z]+)?(?:\.fork-v\d+)?\.bin", path.name):
             continue
         game = GAMES.get(path.parent.name.lower(), path.parent.name)
         try:

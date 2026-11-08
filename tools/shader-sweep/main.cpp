@@ -546,7 +546,7 @@ int main(int argc, char** argv) {
                 std::cout << "shader-sweep [INPUT] [--stage "
                              "vertex|tess-control|tess-eval|geometry|fragment|compute|task|mesh]\n"
                              "  [--format instructions|native-header] [--environment FILE "
-                             "--cache-version 46|47|48|49|50|51|52|53]\n"
+                             "--cache-version 46|47|48|49|50|51|52|53|54]\n"
                              "  [--pipeline-key FILE] [--capture-extent] "
                              "(--output SPV | --lower-only WORDS | --packed-code WORDS)\n";
                 return 0;
@@ -574,8 +574,8 @@ int main(int argc, char** argv) {
                 pipeline_key = value;
             else if (arg == "--cache-version") {
                 if (value != "46" && value != "47" && value != "48" && value != "49" && value != "50" &&
-                    value != "51" && value != "52" && value != "53")
-                    throw std::runtime_error("Expected cache version 46 to 53");
+                    value != "51" && value != "52" && value != "53" && value != "54")
+                    throw std::runtime_error("Expected cache version 46 to 54");
                 version = static_cast<u32>(std::stoul(value));
             } else if (arg == "--output" || arg == "--lower-only" || arg == "--packed-code") {
                 if (!output.empty())

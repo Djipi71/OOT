@@ -38,7 +38,7 @@ new lowering no longer produces the exact bytes stored in the older cache.
 
 ## Inputs and coverage
 
-The loader reads little-endian `yuzucach` Vulkan caches, fork versions 46 through 53. It verifies each
+The loader reads little-endian `yuzucach` Vulkan caches, fork versions 46 through 54. It verifies each
 record boundary and rejects unknown versions or truncated input. Version 47 includes captured
 storage-pointer classifications; versions 48 through 50 retain that layout and version 46 omits them.
 Version 49 invalidates pipelines after tessellation patch-size clamping. Version 50 captures the
@@ -46,7 +46,8 @@ additional texture-table context needed by dynamic texture/static sampler compos
 changes the serialized layout.
 Version 53 stores the three mesh registers and the 80-byte mesh primitive header
 for task/mesh environments. It uses a separate Vulkan environment-cache filename;
-the runtime must support v53 to load those entries.
+the runtime must support v53 to load those entries. Version 54 only invalidates
+entries cached with earlier storage-pointer classifications; its layout matches 53.
 The offline reader preserves that context, but standalone task/mesh compilation
 still reports an explicit context limitation rather than emitting a guessed module.
 Graphics keys are the 1,056-byte layout

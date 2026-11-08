@@ -30,6 +30,7 @@
 #include "common/assert.h"
 #include "common/dkb_frame_trace.h"
 #include "shader_recompiler/exception.h"
+#include "common/fs/path_util.h"
 #include "common/logging.h"
 #include "common/scope_exit.h"
 #include "common/settings.h"
@@ -825,6 +826,8 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func, bool is_in
                   render_trace_frame, render_trace_draws, fmt::join(pipeline->ShaderHashes(), ","),
                   pipeline->HasDynamicVertexInput());
     }
+
+    ProbeVertexShader(pipeline->ShaderHashes(), is_indexed);
 
     if (is_indirect && !mesh_draw && Common::DkbFrameTrace::Enabled()) {
         static const bool readback = [] {
@@ -2586,6 +2589,92 @@ void RasterizerVulkan::TraceRenderState(bool is_indexed, const char* outcome,
     LOG_DEBUG(Render_Vulkan, "Render trace condition: address={:#x} mode={} override={}",
               regs.render_enable.Address(), static_cast<u32>(regs.render_enable.mode),
               static_cast<u32>(regs.render_enable_override));
+}
+
+void RasterizerVulkan::ProbeVertexShader(std::span<const u64> hashes, bool is_indexed) {
+    // EDEN_DJIPI_VS_PROBE=<16 hex digits>: log the vertex input state of the first draws using
+    // that shader and save their vertex streams, indices and constant buffers next to the log.
+    static const u64 target = [] {
+        const char* value = std::getenv("EDEN_DJIPI_VS_PROBE");
+        return value ? std::strtoull(value, nullptr, 16) : 0ULL;
+    }();
+    static u32 probes{};
+    if (target == 0 || probes >= 3 || std::ranges::find(hashes, target) == hashes.end()) {
+        return;
+    }
+    const u32 probe = probes++;
+    const auto& regs = maxwell3d->regs;
+    const auto& draw_state = maxwell3d->draw_manager.draw_state;
+    const auto dir = Common::FS::GetEdenPath(Common::FS::EdenPath::LogDir) / "vs_probe";
+    std::error_code ec;
+    std::filesystem::create_directories(dir, ec);
+    const auto dump = [&](const std::string& name, GPUVAddr address, size_t size) {
+        while (size > 0 && !gpu_memory->IsFullyMappedRange(address, size)) {
+            size /= 2;
+        }
+        if (size == 0) {
+            LOG_INFO(Render_Vulkan, "VS probe {} {}: {:#x} unmapped", probe, name, address);
+            return;
+        }
+        std::vector<u8> bytes(size);
+        gpu_memory->ReadBlockUnsafe(address, bytes.data(), bytes.size());
+        std::ofstream file(dir / fmt::format("probe{}-{}.bin", probe, name), std::ios::binary);
+        file.write(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+        const auto device_addr = gpu_memory->GpuToCpuAddress(address, size);
+        const bool gpu_modified =
+            device_addr && buffer_cache.IsRegionGpuModified(*device_addr, size);
+        LOG_INFO(Render_Vulkan, "VS probe {} {}: address={:#x} bytes={:#x} gpu_modified={}",
+                 probe, name, address, size, gpu_modified);
+    };
+    LOG_INFO(Render_Vulkan,
+             "VS probe {}: hashes={:016x} indexed={} count={} first={} base_vertex={} "
+             "index_format={} instances={}",
+             probe, fmt::join(hashes, ","), is_indexed,
+             is_indexed ? draw_state.index_buffer.count : draw_state.vertex_buffer.count,
+             is_indexed ? draw_state.index_buffer.first : draw_state.vertex_buffer.first,
+             draw_state.base_index, static_cast<u32>(draw_state.index_buffer.format),
+             draw_state.base_instance);
+    for (u32 index = 0; index < Maxwell::NumVertexAttributes; ++index) {
+        const auto& attribute = regs.vertex_attrib_format[index];
+        if (attribute.hex == 0) {
+            continue;
+        }
+        LOG_INFO(Render_Vulkan,
+                 "VS probe {} attribute {}: hex={:#010x} buffer={} constant={} offset={} size={:#x} "
+                 "type={} bgra={} vk_format={}",
+                 probe, index, attribute.hex, attribute.buffer.Value(), attribute.constant.Value(),
+                 attribute.offset.Value(), static_cast<u32>(attribute.size.Value()),
+                 static_cast<u32>(attribute.type.Value()), attribute.bgra.Value(),
+                 static_cast<u32>(MaxwellToVK::VertexFormat(device, attribute.type,
+                                                            attribute.size)));
+    }
+    for (u32 binding = 0; binding < regs.vertex_streams.size(); ++binding) {
+        const auto& stream = regs.vertex_streams[binding];
+        if (!stream.IsEnabled()) {
+            continue;
+        }
+        LOG_INFO(Render_Vulkan, "VS probe {} stream {}: address={:#x} stride={} instanced={}",
+                 probe, binding, stream.Address(), stream.stride.Value(),
+                 regs.vertex_stream_instances.IsInstancingEnabled(binding));
+        dump(fmt::format("stream{}", binding), stream.Address(), 1024 * 1024);
+    }
+    if (is_indexed) {
+        dump("index", regs.index_buffer.IndexStart(),
+             size_t{draw_state.index_buffer.count} * regs.index_buffer.FormatSizeInBytes());
+    }
+    for (size_t stage = 0; stage < 5; ++stage) {
+        for (size_t bank = 0; bank < Maxwell::MaxConstBuffers; ++bank) {
+            const auto& cb = maxwell3d->state.shader_stages[stage].const_buffers[bank];
+            if (!cb.enabled) {
+                continue;
+            }
+            LOG_INFO(Render_Vulkan, "VS probe {} cbuf stage={} bank={}: address={:#x} size={:#x}",
+                     probe, stage, bank, cb.address, cb.size);
+            if (stage == 0) {
+                dump(fmt::format("cbuf{}", bank), cb.address, std::min<size_t>(cb.size, 0x10000));
+            }
+        }
+    }
 }
 
 void RasterizerVulkan::TracePendingCpuWrites(bool compute, std::span<const u64> shader_hashes) {
