@@ -3819,11 +3819,20 @@ void RasterizerVulkan::UpdateLineWidth(Tegra::Engines::Maxwell3D::Regs& regs) {
     scheduler.Record([width](vk::CommandBuffer cmdbuf) { cmdbuf.SetLineWidth(width); });
 }
 
+static int DjipiDiag() {
+    // EDEN_DJIPI_DIAG (diagnostic): 1 = no face culling, 2 = no depth test, 3 = both.
+    static const int value = [] {
+        const char* env = std::getenv("EDEN_DJIPI_DIAG");
+        return env != nullptr ? std::atoi(env) : 0;
+    }();
+    return value;
+}
+
 void RasterizerVulkan::UpdateCullMode(Tegra::Engines::Maxwell3D::Regs& regs) {
     if (!state_tracker.TouchCullMode()) {
         return;
     }
-    scheduler.Record([enabled = regs.gl_cull_test_enabled,
+    scheduler.Record([enabled = regs.gl_cull_test_enabled && (DjipiDiag() & 1) == 0,
                       cull_face = regs.gl_cull_face](vk::CommandBuffer cmdbuf) {
         cmdbuf.SetCullModeEXT(enabled ? MaxwellToVK::CullFace(cull_face) : VK_CULL_MODE_NONE);
     });
@@ -3847,7 +3856,8 @@ void RasterizerVulkan::UpdateDepthTestEnable(Tegra::Engines::Maxwell3D::Regs& re
     if (!state_tracker.TouchDepthTestEnable()) {
         return;
     }
-    scheduler.Record([enable = regs.depth_test_enable](vk::CommandBuffer cmdbuf) {
+    scheduler.Record([enable = regs.depth_test_enable && (DjipiDiag() & 2) == 0](
+                         vk::CommandBuffer cmdbuf) {
         cmdbuf.SetDepthTestEnableEXT(enable);
     });
 }

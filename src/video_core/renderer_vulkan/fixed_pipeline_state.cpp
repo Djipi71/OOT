@@ -358,7 +358,11 @@ void FixedPipelineState::DynamicState::Refresh(const Maxwell& regs) {
     stencil_enable.Assign(regs.stencil_enable);
     depth_write_enable.Assign(regs.depth_write_enabled);
     depth_bounds_enable.Assign(regs.depth_bounds_enable);
-    depth_test_enable.Assign(regs.depth_test_enable);
+    static const int djipi_diag = [] {
+        const char* env = std::getenv("EDEN_DJIPI_DIAG");
+        return env != nullptr ? std::atoi(env) : 0;
+    }();
+    depth_test_enable.Assign(regs.depth_test_enable && (djipi_diag & 2) == 0);
     front_face.Assign(packed_front_face);
     auto depth_func = regs.depth_test_func;
     // EDEN_DJIPI_DEPTH_LEQUAL=1 (diagnostic), as in RasterizerVulkan::UpdateDepthCompareOp.
@@ -376,7 +380,7 @@ void FixedPipelineState::DynamicState::Refresh(const Maxwell& regs) {
     }
     depth_test_func.Assign(PackComparisonOp(depth_func));
     cull_face.Assign(PackCullFace(regs.gl_cull_face));
-    cull_enable.Assign(regs.gl_cull_test_enabled != 0 ? 1 : 0);
+    cull_enable.Assign(regs.gl_cull_test_enabled != 0 && (djipi_diag & 1) == 0 ? 1 : 0);
 }
 
 void FixedPipelineState::DynamicState::Refresh2(const Maxwell& regs,
