@@ -58,7 +58,12 @@ jobs:
           for ($attempt = 1; ; $attempt++) {
             try { Invoke-WebRequest -OutFile $zip $url; break }
             catch {
-              if ($attempt -ge 6) { throw }
+              if ($attempt -ge 6) {
+                # Build without the compiler cache rather than not at all.
+                Write-Host "::warning::sccache unavailable, building without it"
+                "SCCACHE_LAUNCHER=" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+                exit 0
+              }
               Write-Host "sccache download failed ($_), retry $attempt"
               Start-Sleep -Seconds (15 * $attempt)
             }
@@ -66,6 +71,7 @@ jobs:
           Expand-Archive $zip -DestinationPath (Join-Path $env:RUNNER_TEMP 'sccache')
           $bin = (Get-ChildItem -Recurse -Filter sccache.exe (Join-Path $env:RUNNER_TEMP 'sccache')).DirectoryName
           $bin | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
+          "SCCACHE_LAUNCHER=sccache" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
 
       - name: Install Vulkan SDK
         shell: pwsh
@@ -108,8 +114,8 @@ jobs:
           -DLICHII_BUILD_PLATFORM=windows-x86_64
           -DUSE_DISCORD_PRESENCE=OFF
           -DLICHII_LINK_ICF=OFF
-          -DCMAKE_C_COMPILER_LAUNCHER=sccache
-          -DCMAKE_CXX_COMPILER_LAUNCHER=sccache
+          -DCMAKE_C_COMPILER_LAUNCHER=$SCCACHE_LAUNCHER
+          -DCMAKE_CXX_COMPILER_LAUNCHER=$SCCACHE_LAUNCHER
           && break;
           [ "$attempt" = 5 ] && exit 1;
           echo "configure failed, retry $attempt"; sleep $((30 * attempt));
@@ -125,12 +131,12 @@ jobs:
       - name: Build
         shell: bash
         run: |
-          sccache --zero-stats
+          if [ -n "$SCCACHE_LAUNCHER" ]; then sccache --zero-stats; fi
           cmake --build build/release --target yuzu --parallel -- -k 0
-          sccache --show-stats
+          if [ -n "$SCCACHE_LAUNCHER" ]; then sccache --show-stats; fi
 
       - name: Stop sccache
-        if: always() && steps.compiler-cache.outcome == 'success'
+        if: always() && steps.compiler-cache.outcome == 'success' && env.SCCACHE_LAUNCHER != ''
         shell: pwsh
         run: sccache --stop-server
 
