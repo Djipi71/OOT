@@ -2559,6 +2559,14 @@ void RasterizerVulkan::TraceRenderState(bool is_indexed, const char* outcome,
               viewport.scale_x, viewport.scale_y, viewport.scale_z, viewport.translate_x,
               viewport.translate_y, viewport.translate_z, scissor.enable, scissor.min_x.Value(),
               scissor.max_x.Value(), scissor.min_y.Value(), scissor.max_y.Value());
+    LOG_DEBUG(Render_Vulkan,
+              "Render trace stencil: enable={} func={} ref={:#x} func_mask={:#x} mask={:#x} "
+              "two_side={} depth_bounds={} [{}, {}] depth_mode={} ps_sample_mask={}",
+              regs.stencil_enable, static_cast<u32>(regs.stencil_front_op.func),
+              regs.stencil_front_ref, regs.stencil_front_func_mask, regs.stencil_front_mask,
+              regs.stencil_two_side_enable, regs.depth_bounds_enable, regs.depth_bounds[0],
+              regs.depth_bounds[1], static_cast<u32>(regs.depth_mode),
+              regs.ps_output_sample_mask_usage.enable.Value());
     for (size_t binding = 0; binding < regs.vertex_streams.size(); ++binding) {
         const auto& stream = regs.vertex_streams[binding];
         if (stream.IsEnabled()) {
@@ -3820,7 +3828,8 @@ void RasterizerVulkan::UpdateLineWidth(Tegra::Engines::Maxwell3D::Regs& regs) {
 }
 
 static int DjipiDiag() {
-    // EDEN_DJIPI_DIAG (diagnostic): 1 = no face culling, 2 = no depth test, 3 = both.
+    // EDEN_DJIPI_DIAG (diagnostic bits): 1 no face culling, 2 no depth test, 4 no stencil test,
+    // 8 no depth bounds test.
     static const int value = [] {
         const char* env = std::getenv("EDEN_DJIPI_DIAG");
         return env != nullptr ? std::atoi(env) : 0;
@@ -3842,7 +3851,7 @@ void RasterizerVulkan::UpdateDepthBoundsTestEnable(Tegra::Engines::Maxwell3D::Re
     if (!state_tracker.TouchDepthBoundsTestEnable()) {
         return;
     }
-    bool enabled = regs.depth_bounds_enable;
+    bool enabled = regs.depth_bounds_enable && (DjipiDiag() & 8) == 0;
     if (enabled && !device.IsDepthBoundsSupported()) {
         LOG_WARNING(Render_Vulkan, "Depth bounds is enabled but not supported");
         enabled = false;
@@ -4262,7 +4271,8 @@ void RasterizerVulkan::UpdateStencilTestEnable(Tegra::Engines::Maxwell3D::Regs& 
     if (!state_tracker.TouchStencilTestEnable()) {
         return;
     }
-    scheduler.Record([enable = regs.stencil_enable](vk::CommandBuffer cmdbuf) {
+    scheduler.Record([enable = regs.stencil_enable && (DjipiDiag() & 4) == 0](
+                         vk::CommandBuffer cmdbuf) {
         cmdbuf.SetStencilTestEnableEXT(enable);
     });
 }

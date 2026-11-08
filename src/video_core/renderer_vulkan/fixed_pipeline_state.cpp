@@ -355,9 +355,13 @@ void FixedPipelineState::DynamicState::Refresh(const Maxwell& regs) {
         back.action_depth_pass.Assign(front.action_depth_pass);
         back.test_func.Assign(front.test_func);
     }
-    stencil_enable.Assign(regs.stencil_enable);
+    static const int djipi_diag_early = [] {
+        const char* env = std::getenv("EDEN_DJIPI_DIAG");
+        return env != nullptr ? std::atoi(env) : 0;
+    }();
+    stencil_enable.Assign(regs.stencil_enable && (djipi_diag_early & 4) == 0);
     depth_write_enable.Assign(regs.depth_write_enabled);
-    depth_bounds_enable.Assign(regs.depth_bounds_enable);
+    depth_bounds_enable.Assign(regs.depth_bounds_enable && (djipi_diag_early & 8) == 0);
     static const int djipi_diag = [] {
         const char* env = std::getenv("EDEN_DJIPI_DIAG");
         return env != nullptr ? std::atoi(env) : 0;
