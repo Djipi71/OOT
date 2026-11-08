@@ -53,7 +53,16 @@ jobs:
         shell: pwsh
         run: |
           $zip = Join-Path $env:RUNNER_TEMP 'sccache.zip'
-          Invoke-WebRequest -OutFile $zip https://github.com/mozilla/sccache/releases/download/v0.19.0/sccache-v0.19.0-x86_64-pc-windows-msvc.zip
+          $url = 'https://github.com/mozilla/sccache/releases/download/v0.19.0/sccache-v0.19.0-x86_64-pc-windows-msvc.zip'
+          # GitHub release downloads time out now and then (504): retry with a growing delay.
+          for ($attempt = 1; ; $attempt++) {
+            try { Invoke-WebRequest -OutFile $zip $url; break }
+            catch {
+              if ($attempt -ge 6) { throw }
+              Write-Host "sccache download failed ($_), retry $attempt"
+              Start-Sleep -Seconds (15 * $attempt)
+            }
+          }
           Expand-Archive $zip -DestinationPath (Join-Path $env:RUNNER_TEMP 'sccache')
           $bin = (Get-ChildItem -Recurse -Filter sccache.exe (Join-Path $env:RUNNER_TEMP 'sccache')).DirectoryName
           $bin | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
@@ -82,7 +91,9 @@ jobs:
 
       - name: Configure
         shell: bash
+        # CPM downloads dependencies from GitHub releases, which time out now and then: retry.
         run: >-
+          for attempt in 1 2 3 4 5; do
           cmake -S . -B build/release -G Ninja
           -DCMAKE_BUILD_TYPE=Release
           -DBUILD_TESTING=OFF
@@ -99,6 +110,10 @@ jobs:
           -DLICHII_LINK_ICF=OFF
           -DCMAKE_C_COMPILER_LAUNCHER=sccache
           -DCMAKE_CXX_COMPILER_LAUNCHER=sccache
+          && break;
+          [ "$attempt" = 5 ] && exit 1;
+          echo "configure failed, retry $attempt"; sleep $((30 * attempt));
+          done
 
       - name: Save CPM downloads
         if: steps.cpm-cache.outputs.cache-hit != 'true'
