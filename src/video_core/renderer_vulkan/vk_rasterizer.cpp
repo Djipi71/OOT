@@ -1699,7 +1699,11 @@ void RasterizerVulkan::Clear(u32 layer_count) {
         return;
     }
 
-    constexpr bool ENABLE_DEFERRED_CLEAR = true;
+    // EDEN_DJIPI_NO_DEFER_CLEAR=1 (A/B): clears are recorded at once, never as load-op clears.
+    static const bool ENABLE_DEFERRED_CLEAR = [] {
+        const char* value = std::getenv("EDEN_DJIPI_NO_DEFER_CLEAR");
+        return value == nullptr || value[0] != '1';
+    }();
     const bool color_full_channels = regs.clear_surface.R && regs.clear_surface.G &&
                                      regs.clear_surface.B && regs.clear_surface.A;
     const bool stencil_partial = use_stencil && framebuffer->HasAspectStencilBit() &&
@@ -4057,7 +4061,22 @@ void RasterizerVulkan::UpdateDepthCompareOp(Tegra::Engines::Maxwell3D::Regs& reg
     if (!state_tracker.TouchDepthCompareOp()) {
         return;
     }
-    scheduler.Record([func = regs.depth_test_func](vk::CommandBuffer cmdbuf) {
+    // EDEN_DJIPI_DEPTH_LEQUAL=1 (diagnostic): Less becomes LessOrEqual, so geometry at the depth
+    // already stored still draws (Ocarina's caves draw their walls with 0 samples passing).
+    static const bool less_equal = [] {
+        const char* value = std::getenv("EDEN_DJIPI_DEPTH_LEQUAL");
+        return value != nullptr && value[0] == '1';
+    }();
+    auto depth_func = regs.depth_test_func;
+    if (less_equal) {
+        using Op = Tegra::Engines::Maxwell3D::Regs::ComparisonOp;
+        if (depth_func == Op::Less_D3D) {
+            depth_func = Op::LessEqual_D3D;
+        } else if (depth_func == Op::Less_GL) {
+            depth_func = Op::LessEqual_GL;
+        }
+    }
+    scheduler.Record([func = depth_func](vk::CommandBuffer cmdbuf) {
         cmdbuf.SetDepthCompareOpEXT(MaxwellToVK::ComparisonOp(func));
     });
 }

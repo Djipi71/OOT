@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <bit>
 #include <numeric>
@@ -359,7 +360,21 @@ void FixedPipelineState::DynamicState::Refresh(const Maxwell& regs) {
     depth_bounds_enable.Assign(regs.depth_bounds_enable);
     depth_test_enable.Assign(regs.depth_test_enable);
     front_face.Assign(packed_front_face);
-    depth_test_func.Assign(PackComparisonOp(regs.depth_test_func));
+    auto depth_func = regs.depth_test_func;
+    // EDEN_DJIPI_DEPTH_LEQUAL=1 (diagnostic), as in RasterizerVulkan::UpdateDepthCompareOp.
+    static const bool less_equal = [] {
+        const char* value = std::getenv("EDEN_DJIPI_DEPTH_LEQUAL");
+        return value != nullptr && value[0] == '1';
+    }();
+    if (less_equal) {
+        using Op = Maxwell::ComparisonOp;
+        if (depth_func == Op::Less_D3D) {
+            depth_func = Op::LessEqual_D3D;
+        } else if (depth_func == Op::Less_GL) {
+            depth_func = Op::LessEqual_GL;
+        }
+    }
+    depth_test_func.Assign(PackComparisonOp(depth_func));
     cull_face.Assign(PackCullFace(regs.gl_cull_face));
     cull_enable.Assign(regs.gl_cull_test_enabled != 0 ? 1 : 0);
 }
