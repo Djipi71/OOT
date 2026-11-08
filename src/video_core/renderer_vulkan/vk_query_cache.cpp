@@ -5,6 +5,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <cstddef>
+#include <cstdlib>
 #include <limits>
 #include <map>
 #include <memory>
@@ -219,8 +220,14 @@ public:
         // Time's title screen and file select reached 16,384 slots over 64 banks, while gameplay
         // windows in Hyrule Field, Kakariko Village, and the Shooting Gallery reach up to 346
         // slots across two banks. Past 4 banks (1,024 slots), drop the count as a reset would.
-        static constexpr size_t MaxRunningQuerySlots = 4 * SamplesQueryBank::BANK_SIZE;
-        if (current_query && current_query->size_slots > MaxRunningQuerySlots) {
+        // EDEN_DJIPI_QUERY_SLOTS overrides the bound; 0 never drops a count.
+        static const size_t MaxRunningQuerySlots = [] {
+            const char* value = std::getenv("EDEN_DJIPI_QUERY_SLOTS");
+            return value ? static_cast<size_t>(std::strtoull(value, nullptr, 10))
+                         : size_t{4 * SamplesQueryBank::BANK_SIZE};
+        }();
+        if (current_query && MaxRunningQuerySlots != 0 &&
+            current_query->size_slots > MaxRunningQuerySlots) {
             // It drops a real count. Logged on the 1st, 2nd, 4th, 8th... drop, so a window this
             // long during gameplay doesn't go unnoticed and a title screen doesn't flood the log.
             ++bank_bound_resets;
