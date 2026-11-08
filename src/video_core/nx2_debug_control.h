@@ -111,6 +111,13 @@ inline void LoadExperiments() {
         // EXP35 = 2 (2026-11-08): every guest write collected (guest-core write lock spinning 0.7% ->
         // 0, standing 45.3 -> 46.5 fps, route flash reports 253 = camera noise).
         g_experiments[35].store(2, std::memory_order_relaxed);
+        // EXP42 = 1 and EXP43 = 3 (2026-11-08, moving-NPC dips): pooled VkImages for deleted
+        // render targets, and drifted per-frame targets relocated in place (the newest of several
+        // predecessors). Castle Town live toggles: EXP43 0/3 46.3 -> 49.3 fps, EXP42 0/1 on top
+        // 44.7 -> 47.9 (each won all 4 pairs); 21 loads 0 washed out; owner playtest: no visual
+        // bugs, rarely under 40 fps.
+        g_experiments[42].store(1, std::memory_order_relaxed);
+        g_experiments[43].store(3, std::memory_order_relaxed);
         for (int n = 0; n < ExperimentCount; ++n) {
             const std::string name = "EDEN_NX2_EXP" + std::to_string(n);
             if (const char* value = std::getenv(name.c_str())) {
