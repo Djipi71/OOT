@@ -106,6 +106,9 @@ inline void LoadExperiments() {
         // compute inline uploads not recorded); 1 (memory usage reuse) changes what the caches'
         // GC sees and stays off.
         g_experiments[29].store(6, std::memory_order_relaxed);
+        // EXP35 = 1: guest writes of never-GPU-written cached pages collected for the back instead
+        // of OnCPUWrite under both caches' mutexes (see the EXP35 notes above).
+        g_experiments[35].store(1, std::memory_order_relaxed);
         for (int n = 0; n < ExperimentCount; ++n) {
             const std::string name = "EDEN_NX2_EXP" + std::to_string(n);
             if (const char* value = std::getenv(name.c_str())) {
