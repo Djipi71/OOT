@@ -145,7 +145,6 @@
     <addaction name="action_Fullscreen"/>
     <addaction name="action_Single_Window_Mode"/>
     <addaction name="action_Enable_Overlay_Applet"/>
-    <addaction name="action_Show_Filter_Bar"/>
     <addaction name="action_Show_Status_Bar"/>
     <addaction name="action_Show_Performance_Overlay"/>
     <addaction name="action_Post_Processing_Shaders"/>

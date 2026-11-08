@@ -77,8 +77,8 @@
            </sizepolicy>
           </property>
           <property name="styleSheet">
-           <string notr="true">background-color: black; color: white;
-font: 75 20pt &quot;Arial&quot;;</string>
+           <string notr="true">background-color: black; color: #e8c35a;
+font: 75 20pt &quot;Georgia&quot;;</string>
           </property>
           <property name="text">
            <string>Loading Shaders 387 / 1628</string>
@@ -101,14 +101,15 @@ font: 75 20pt &quot;Arial&quot;;</string>
           </property>
           <property name="styleSheet">
            <string notr="true">QProgressBar {
-color: white;
-border: 2px solid white;
-outline-color: black;
-border-radius: 20px;
+color: #f3dc8c;
+background-color: #0d0905;
+border: 3px solid #c9a23a;
+border-radius: 10px;
+padding: 3px;
 }
 QProgressBar::chunk {
-background-color: white;
-border-radius: 15px;
+background-color: #e8c35a;
+border-radius: 6px;
 }</string>
           </property>
           <property name="value">
@@ -128,8 +129,8 @@ border-radius: 15px;
            <string notr="true"/>
           </property>
           <property name="styleSheet">
-           <string notr="true">background-color: black; color: white;
-font: 75 15pt &quot;Arial&quot;;</string>
+           <string notr="true">background-color: black; color: #c9a23a;
+font: 75 15pt &quot;Georgia&quot;;</string>
           </property>
           <property name="text">
            <string>Estimated Time 5m 4s</string>

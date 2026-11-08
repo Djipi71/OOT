@@ -56,8 +56,9 @@ GameList::GameList(FileSys::VirtualFilesystem vfs_, FileSys::ManualContentProvid
 
     SetupViews();
 
+    // OOT Remake runs one game: the filter bar and its search field are never shown.
     search_field = new GameListSearchField(this);
-    layout->addWidget(search_field);
+    search_field->setVisible(false);
 
     controller_navigation = new ControllerNavigation(system.HIDCore(), this);
 
@@ -133,7 +134,8 @@ void GameList::SetFilterFocus() {
 }
 
 void GameList::SetFilterVisible(bool visibility) {
-    search_field->setVisible(visibility);
+    (void)visibility;
+    search_field->setVisible(false);
 }
 
 bool GameList::IsEmpty() const {

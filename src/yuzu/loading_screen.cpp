@@ -26,31 +26,46 @@
 #include <QMovie>
 #endif
 
+// OOT Remake: the colours of the Hylian crest icon (dark bronze, gold, crimson).
 constexpr char PROGRESSBAR_STYLE_PREPARE[] = R"(
-QProgressBar {}
-QProgressBar::chunk {})";
+QProgressBar {
+  background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #1c140a, stop:1 #0d0905);
+  border: 3px solid qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #f3dc8c, stop:0.5 #c9a23a,
+                                    stop:1 #7a5a1c);
+  border-radius: 10px;
+  padding: 3px;
+}
+QProgressBar::chunk {
+  background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #b52a2a, stop:1 #6e1010);
+  border-radius: 6px;
+})";
 
 constexpr char PROGRESSBAR_STYLE_BUILD[] = R"(
 QProgressBar {
-  background-color: black;
-  border: 2px solid white;
-  border-radius: 4px;
-  padding: 2px;
+  background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #1c140a, stop:1 #0d0905);
+  border: 3px solid qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #f3dc8c, stop:0.5 #c9a23a,
+                                    stop:1 #7a5a1c);
+  border-radius: 10px;
+  padding: 3px;
 }
 QProgressBar::chunk {
-  background-color: #ff3c28;
-  width: 1px;
+  background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #fff1b0, stop:0.35 #e8c35a,
+                                    stop:0.7 #c9a23a, stop:1 #8a6420);
+  border-radius: 6px;
 })";
 
 constexpr char PROGRESSBAR_STYLE_COMPLETE[] = R"(
 QProgressBar {
-  background-color: #0ab9e6;
-  border: 2px solid white;
-  border-radius: 4px;
-  padding: 2px;
+  background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #1c140a, stop:1 #0d0905);
+  border: 3px solid qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #f3dc8c, stop:0.5 #c9a23a,
+                                    stop:1 #7a5a1c);
+  border-radius: 10px;
+  padding: 3px;
 }
 QProgressBar::chunk {
-  background-color: #ff3c28;
+  background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #fff6c8, stop:0.5 #f0cf68,
+                                    stop:1 #b8892c);
+  border-radius: 6px;
 })";
 
 LoadingScreen::LoadingScreen(QWidget* parent)
