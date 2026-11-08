@@ -7,6 +7,7 @@
 add_executable(tests
     video_core/unswizzle_workers.cpp
     video_core/aftermath_dump.cpp
+    video_core/host_mip_limits.cpp
     video_core/gpu_timestamp.cpp
     core/nx2_streamplay.cpp
     core/nx2_video_ready.cpp
