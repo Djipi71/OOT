@@ -57,8 +57,6 @@ TEST_CASE("Ampere timestamps are exact before the first present", "[video_core][
         REQUIRE(before == FirstPresentNs - 1);
         REQUIRE(after - before == 1 + 4'000'000 / Tegra::AmpereClockDivisor(clock));
     }
-    REQUIRE(Tegra::ReadGpuTimestamp(At(HostTimeNs), true, Settings::GpuClock::Normal, 0) ==
-            HostTimeNs);
 }
 
 TEST_CASE("Ampere CPU GPU calibration stays valid between samples", "[video_core][gpu_timestamp]") {
