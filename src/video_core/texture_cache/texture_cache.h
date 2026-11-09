@@ -634,11 +634,12 @@ typename P::ImageView& TextureCache<P>::GetImageView(u32 index) noexcept {
     return slot_image_views[image_view_id];
 }
 
-/// EDEN_NX2_TC_COLD_FRAMES (the cold sweep's K, 0 = off).
+/// EDEN_NX2_TC_COLD_FRAMES (the cold sweep's K, 0 = off). On by default (K = 4), as in
+/// Frizti's Fritchii v5 (8ccfd055): drifted render target chains are deleted once cold.
 inline u64 TcColdFrames() {
     static const u64 frames = [] {
         const char* value = std::getenv("EDEN_NX2_TC_COLD_FRAMES");
-        return value != nullptr ? std::strtoull(value, nullptr, 10) : 0ULL;
+        return value != nullptr ? std::strtoull(value, nullptr, 10) : 4ULL;
     }();
     return frames;
 }
