@@ -4232,7 +4232,6 @@ void TextureCache<P>::RelocateImage(ImageId image_id, GPUVAddr gpu_addr, DAddr c
     // 5. Page tables, map view, page filter, LRU.
     RegisterImage(image_id);
     // 6. As DeleteImage: render targets and descriptor tables are looked up again.
-    ++bindings_epoch;
     auto& dirty = maxwell3d->dirty.flags;
     dirty[Dirty::RenderTargets] = true;
     dirty[Dirty::ZetaBuffer] = true;

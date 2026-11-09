@@ -1518,6 +1518,8 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
             (used_pipelines.empty() ? queued_graphics >= MaxPipelinesWithoutUsedList
                                     : !used_pipelines.contains(hash))) {
             ++skipped_pipelines;
+            // The precache builds the newest record (records are tried newest first).
+            auto& envs = records.front();
             size_t capture_bytes = (envs.capacity() - envs.size()) * sizeof(FileEnvironment);
             for (const auto& env : envs) {
                 capture_bytes += env.MemorySize();

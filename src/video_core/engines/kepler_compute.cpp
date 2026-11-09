@@ -29,6 +29,7 @@
 #include "video_core/nx2.h"
 #include "video_core/engines/fermi_2d.h"
 #include "video_core/engines/kepler_compute.h"
+#include "video_core/nx2_debug_control.h"
 #include "video_core/nx2_indirect_grid.h"
 #include "video_core/engines/native_upscale.h"
 #include "video_core/engines/maxwell_3d.h"

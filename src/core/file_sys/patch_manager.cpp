@@ -112,8 +112,8 @@ constexpr std::array DYNAMIC_FPS_RECORDS{
     BuiltinPatchRecord{.module_offset = 0x3C46200, .bytes = DYNAMIC_FPS_ROUTINE},
 };
 constexpr std::array FPS_UNLOCK_RECORDS{
-    BuiltinPatchRecord{0x6E6CC4, DYNAMIC_FPS_CALL, DYNAMIC_FPS_ORIGINAL},
-    BuiltinPatchRecord{0x3C46200, FPS_UNLOCK_ROUTINE, {}, true},
+    BuiltinPatchRecord{.module_offset = 0x6E6CC4, .bytes = DYNAMIC_FPS_CALL},
+    BuiltinPatchRecord{.module_offset = 0x3C46200, .bytes = FPS_UNLOCK_ROUTINE},
 };
 
 // Occlusion Off (cLohan's community patch, from zortos293/Lichii#641): the game creates no
