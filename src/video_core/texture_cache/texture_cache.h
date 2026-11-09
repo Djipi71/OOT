@@ -599,6 +599,21 @@ void TextureCache<P>::TickFrame() {
         }
         async_buffers_death_ring.clear();
     }
+    if (relocation_seen && frame_tick % 600 == 0) {
+        u32 guarded_shapes = 0;
+        for (const auto& [key, shape] : relocation_shapes) {
+            guarded_shapes += shape.guard != 0 ? 1 : 0;
+        }
+        LOG_INFO(HW_GPU,
+                 "Render target relocation (EXP43={}) last 600 frames: {} candidates, {} kept by "
+                 "the guard, {} relocated, {} retired early, {} over 2+ images of their shape; "
+                 "{} of {} shapes guarded",
+                 VideoCore::Nx2Debug::Experiment(43), relocation_candidates, relocation_guarded,
+                 relocation_relocated, relocation_retired, relocation_crowded, guarded_shapes,
+                 relocation_shapes.size());
+        relocation_candidates = relocation_guarded = relocation_relocated = relocation_retired =
+            relocation_crowded = 0;
+    }
 }
 
 template <class P>
@@ -699,21 +714,6 @@ void TextureCache<P>::CheckFeedbackLoop(std::span<const ImageViewInOut> views) {
     }
     if (render_targets_serial != last_feedback_loop_serial) {
         feedback_depth_dirty = true;
-    }
-    if (relocation_seen && frame_tick % 600 == 0) {
-        u32 guarded_shapes = 0;
-        for (const auto& [key, shape] : relocation_shapes) {
-            guarded_shapes += shape.guard != 0 ? 1 : 0;
-        }
-        LOG_INFO(HW_GPU,
-                 "Render target relocation (EXP43={}) last 600 frames: {} candidates, {} kept by "
-                 "the guard, {} relocated, {} retired early, {} over 2+ images of their shape; "
-                 "{} of {} shapes guarded",
-                 VideoCore::Nx2Debug::Experiment(43), relocation_candidates, relocation_guarded,
-                 relocation_relocated, relocation_retired, relocation_crowded, guarded_shapes,
-                 relocation_shapes.size());
-        relocation_candidates = relocation_guarded = relocation_relocated = relocation_retired =
-            relocation_crowded = 0;
     }
 
     if (rt_active_mask == 0) {
