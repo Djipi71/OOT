@@ -93,6 +93,37 @@ constexpr std::array MAX_RESOLUTION_RECORDS{
                        .original = 0x360041E8}, // tbz w8, #0, 0x80640c
 };
 
+// RsMan-Dev's texture pool patch (zortos293/Lichii#1313): stp x8, x9, [sp, #0x10] stores the
+// graphics allocator's initial pool size (x8); the call doubles it first (lsl x8, x8, #1 ; stp ;
+// ret). With Max Resolution the guard house outgrows the initial pool and dereferences a null
+// allocation. Upstream puts the routine at main+0x3C462C0, inside the Hyrule Cheat Menu's span
+// (0x3C46280..0x3C46398); here it sits after our cave, on the same text page (bl 0x3c46f80).
+constexpr size_t TEXTURE_POOL_ROUTINE_OFFSET = 0x3C46F80;
+constexpr std::array<u8, 4> TEXTURE_POOL_CALL{0x05, 0x73, 0xC0, 0x94};
+constexpr std::array<u8, 12> TEXTURE_POOL_ROUTINE{
+    0x08, 0xF9, 0x7F, 0xD3, 0xE8, 0x27, 0x01, 0xA9, 0xC0, 0x03, 0x5F, 0xD6,
+};
+static_assert(TEXTURE_POOL_ROUTINE_OFFSET >= 0x3C46E00 + 0x110 &&
+              TEXTURE_POOL_ROUTINE_OFFSET + TEXTURE_POOL_ROUTINE.size() <= 0x3C47000);
+constexpr std::array TEXTURE_POOL_RECORDS{
+    BuiltinPatchRecord{.module_offset = 0xC2A36C,
+                       .bytes = TEXTURE_POOL_CALL,
+                       .checked = true,
+                       .original = 0xA90127E8}, // stp x8, x9, [sp, #0x10]
+    BuiltinPatchRecord{.module_offset = TEXTURE_POOL_ROUTINE_OFFSET,
+                       .bytes = std::span<const u8>{TEXTURE_POOL_ROUTINE}.subspan(0, 4),
+                       .checked = true,
+                       .original = 0},
+    BuiltinPatchRecord{.module_offset = TEXTURE_POOL_ROUTINE_OFFSET + 4,
+                       .bytes = std::span<const u8>{TEXTURE_POOL_ROUTINE}.subspan(4, 4),
+                       .checked = true,
+                       .original = 0},
+    BuiltinPatchRecord{.module_offset = TEXTURE_POOL_ROUTINE_OFFSET + 8,
+                       .bytes = std::span<const u8>{TEXTURE_POOL_ROUTINE}.subspan(8, 4),
+                       .checked = true,
+                       .original = 0},
+};
+
 // Dynamic FPS by Dark (Eglantine Dev), bundled with his permission: the game's frame step follows
 // the time measured with the system counter instead of assuming 30 fps, so it runs at full speed
 // at any frame rate. A call (bl 0x3c46200) to a routine in unused space after the code.
@@ -286,6 +317,13 @@ constexpr std::array BUILTIN_PATCHES{
         .build_id = "E0F3CCFAF50065AE4EA01EB5AEB13B1A45DA3348",
         .records = MAX_RESOLUTION_RECORDS,
         .disable_env = "EDEN_NX2_NO_MAX_RES",
+    },
+    BuiltinPatch{
+        .name = "Texture Pool x2 (built-in)",
+        .title_id = 0x0400486024DEC000,
+        .module = "main",
+        .build_id = "E0F3CCFAF50065AE4EA01EB5AEB13B1A45DA3348",
+        .records = TEXTURE_POOL_RECORDS,
     },
     // Before Dark's: it contains his routine and replaces it while applied. Off by default; only
     // listed in Add-Ons while the setting is on.
