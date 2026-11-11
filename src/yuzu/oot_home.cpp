@@ -11,6 +11,9 @@
 #include <QGridLayout>
 #include <QHBoxLayout>
 #include <QLabel>
+#include <QPainter>
+#include <QPainterPath>
+#include <QPen>
 #include <QPixmap>
 #include <QPushButton>
 #include <QRegularExpression>
@@ -46,7 +49,8 @@ QLabel#title { font-family: "Cinzel", "Trajan Pro", Georgia, serif; font-size: @
 QLabel#chip { color: #a89a7c; font-size: @13px; border: 1px solid #3a3120; border-radius: @11px; padding: @3px @11px; }
 QLabel#summary { font-size: @16px; }
 QLabel#muted, QLabel#hint { color: #a89a7c; font-size: @12px; }
-QLabel#cover { border: 1px solid #8a6a28; border-radius: @16px; background: #1f180c; }
+QLabel#cover { border: none; background: transparent; }
+QWidget#content { background: transparent; }
 QLabel#label { color: #a89a7c; font-size: @11px; font-weight: 600; letter-spacing: 1px; }
 QLabel#section { color: #d9a93f; font-family: "Cinzel", Georgia, serif; font-size: @19px; font-weight: 700; }
 QWidget#settings { background: #1c1810; border: 1px solid #3a3120; border-radius: @14px; }
@@ -124,6 +128,7 @@ OotHome::OotHome(QWidget* parent, OotHomeHooks hooks_) : QWidget(parent), hooks{
     auto* centre = new QHBoxLayout;
     centre->addStretch(1);
     content = new QWidget(this);
+    content->setObjectName(QStringLiteral("content"));
     content->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Maximum);
     centre->addWidget(content, 100);
     centre->addStretch(1);
@@ -421,11 +426,32 @@ void OotHome::ShowCover() {
         cover->clear();
         return;
     }
+    // The image fills a rounded card with its own gold edge: no square corners show.
     const qreal ratio = devicePixelRatioF();
-    QPixmap image = cover_source.scaled((cover->size() - QSize(8, 8)) * ratio,
-                                        Qt::KeepAspectRatio, Qt::SmoothTransformation);
-    image.setDevicePixelRatio(ratio);
-    cover->setPixmap(image);
+    const QSize target = cover->size() * ratio;
+    QPixmap image = cover_source.scaled(target, Qt::KeepAspectRatioByExpanding,
+                                        Qt::SmoothTransformation);
+    image = image.copy((image.width() - target.width()) / 2,
+                       (image.height() - target.height()) / 2, target.width(), target.height());
+    QPixmap card(target);
+    card.fill(Qt::transparent);
+    {
+        QPainter painter(&card);
+        painter.setRenderHint(QPainter::Antialiasing);
+        painter.setRenderHint(QPainter::SmoothPixmapTransform);
+        const qreal edge = 1.5 * ratio;
+        const qreal radius = 16 * scale * ratio;
+        QPainterPath path;
+        path.addRoundedRect(QRectF(card.rect()).adjusted(edge / 2, edge / 2, -edge / 2, -edge / 2),
+                            radius, radius);
+        painter.setClipPath(path);
+        painter.drawPixmap(0, 0, image);
+        painter.setClipping(false);
+        painter.setPen(QPen(QColor(0x8a, 0x6a, 0x28), edge));
+        painter.drawPath(path);
+    }
+    card.setDevicePixelRatio(ratio);
+    cover->setPixmap(card);
 }
 
 void OotHome::resizeEvent(QResizeEvent* event) {
