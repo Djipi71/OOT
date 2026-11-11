@@ -12,7 +12,8 @@
 
 # OOT Remake
 
-A build of Lichii dedicated to The Legend of Zelda: Ocarina of Time on Switch 2 (program id
+A build of Frizti's Fritchii and zortos293's Lichii (see Credits) dedicated to The Legend
+of Zelda: Ocarina of Time on Switch 2 (program id
 0400486024DEC000). Launched without arguments, `OOT Remake.exe` asks once for your dump (NSP/XCI
 or the exefs `main`) and then boots it directly. The built-in Max Resolution and Dynamic FPS
 patches are applied to build E0F3CCFAF50065AE4EA01EB5AEB13B1A45DA3348. Keys, firmware and the
@@ -27,9 +28,26 @@ Windows needs the Microsoft Visual C++ 2015-2022 Redistributable (x64). It is no
 https://aka.ms/vs/17/release/vc_redist.x64.exe. Windows builds come from the `oot-windows` workflow
 (Actions tab, artifact `OOT-Remake-windows-*`).
 
-Djipi builds are based on [Lichii](https://github.com/zortos293/Lichii) (zortos293),
-[Frizti's fork](https://github.com/Frizti/Lichii), Eglantine, Eden and yuzu, all GPL-3.0; the
-source keeps their copyright notices.
+For the "Preparing shaders" screen, copy the `recipes` folder of a Fritchii release (same cache
+version) next to `OOT Remake.exe`.
+
+## Credits
+
+OOT Remake (Djipi) is built on the work of others; thank you to all of them:
+
+- **[Fritchii](https://github.com/Frizti/Fritchii) by Frizti**: the base of this build. The
+  Ocarina of Time engine work (the "Preparing shaders" screen and precompiled pipelines, async
+  shader translation, render target relocation and image pool, the render-frame clock, the host
+  frame pacer, the high refresh mode, the tuned settings, and many fixes and performance gains).
+- **[Lichii](https://github.com/zortos293/Lichii) by zortos293 and its contributors**: the
+  Switch 2 emulation Fritchii builds on, and the fixes ported here from Lichii up to build-150
+  (damaged NUP dumps #1197 by RsMan-Dev, the ocarina crackle #1196, and others named in the
+  commit history).
+- Eglantine, Eden, yuzu and their contributors, whose work Lichii builds on.
+- Dark's Dynamic FPS, bundled with his permission by Lichii and Fritchii.
+
+All of them are GPL-3.0 (yuzu parts GPL-2.0-or-later); the source keeps their copyright notices.
+OOT Remake is not affiliated with Nintendo.
 
 Everything below is the upstream Lichii README.
 
