@@ -1,6 +1,6 @@
 name: oot-windows
 
-# Builds "OOT Remake.exe" for Windows and uploads it as a workflow artifact (no public release).
+# Builds "OOT Remake.exe" for Windows and uploads it as a workflow artifact (no release).
 on:
   workflow_dispatch:
   push:
