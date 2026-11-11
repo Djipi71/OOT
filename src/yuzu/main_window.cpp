@@ -5297,9 +5297,9 @@ void MainWindow::OnApplicationChanged(u64 program_id) {
 void MainWindow::UpdateWindowTitle(std::string_view title_name, std::string_view title_version,
                                    std::string_view gpu_vendor) {
     static const std::string build_id = std::string{Common::g_build_id};
-    static const std::string yuzu_title =
-        fmt::format("{} | {} | {}", std::string{Common::g_build_name},
-                    std::string{Common::g_build_version}, std::string{Common::g_compiler_id});
+    // OOT Remake: name and version only (the compiler stays in About and the log).
+    static const std::string yuzu_title = fmt::format("{} | {}", std::string{Common::g_build_name},
+                                                      std::string{Common::g_build_version});
 
     const auto override_title =
         fmt::format(fmt::runtime(std::string(Common::g_title_bar_format_idle)), build_id);
@@ -5308,12 +5308,12 @@ void MainWindow::UpdateWindowTitle(std::string_view title_name, std::string_view
     if (title_name.empty()) {
         setWindowTitle(QString::fromStdString(window_title));
     } else {
-        const auto run_title = [window_title, title_name, title_version, gpu_vendor]() {
+        static_cast<void>(gpu_vendor);
+        const auto run_title = [window_title, title_name, title_version]() {
             if (title_version.empty()) {
-                return fmt::format("{} | {} | {}", window_title, title_name, gpu_vendor);
+                return fmt::format("{} | {}", window_title, title_name);
             }
-            return fmt::format("{} | {} | {} | {}", window_title, title_name, title_version,
-                               gpu_vendor);
+            return fmt::format("{} | {} | {}", window_title, title_name, title_version);
         }();
         setWindowTitle(QString::fromStdString(run_title));
     }

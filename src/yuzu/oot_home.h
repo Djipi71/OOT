@@ -3,8 +3,11 @@
 #pragma once
 
 #include <functional>
+#include <utility>
+#include <vector>
 #include <QFutureWatcher>
 #include <QImage>
+#include <QPixmap>
 #include <QWidget>
 #include "common/common_types.h"
 
@@ -12,6 +15,7 @@ class QButtonGroup;
 class QCheckBox;
 class QComboBox;
 class QLabel;
+class QLayout;
 class QPushButton;
 class QSlider;
 
@@ -37,6 +41,9 @@ public:
     /// Reads the dump again and shows the current settings.
     void Refresh();
 
+protected:
+    void resizeEvent(QResizeEvent* event) override;
+
 private:
     struct DumpInfo {
         QString title;
@@ -47,14 +54,22 @@ private:
     static DumpInfo ReadDump(const QString& path);
 
     void ShowDump(const DumpInfo& info);
+    void ShowCover();
     void ShowSettings();
+    /// Sizes, fonts and spacing for the window's size (1 = a 1280x760 area).
+    void ApplyScale(double next);
     void UpdateFpsHint();
 
     OotHomeHooks hooks;
     QFutureWatcher<DumpInfo> dump_watcher;
     QString shown_path;
 
+    QWidget* content = nullptr;
     QLabel* cover = nullptr;
+    QPixmap cover_source;
+    double scale = 0.0;
+    std::vector<std::pair<QLayout*, int>> spacings;
+    std::vector<std::pair<QLayout*, int>> margins;
     QLabel* title = nullptr;
     QLabel* version = nullptr;
     QLabel* program_id = nullptr;
