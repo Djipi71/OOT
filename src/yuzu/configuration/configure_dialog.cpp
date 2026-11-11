@@ -256,6 +256,13 @@ void ConfigureDialog::PopulateSelectionList() {
     }
 }
 
+void ConfigureDialog::ShowControls() {
+    const auto items = ui->selectorList->findItems(tr("Controls"), Qt::MatchExactly);
+    if (!items.isEmpty()) {
+        ui->selectorList->setCurrentItem(items.first());
+    }
+}
+
 void ConfigureDialog::OnLanguageChanged(const QString& locale) {
     emit LanguageChanged(locale);
     //  Reloading the game list is needed to force retranslation.

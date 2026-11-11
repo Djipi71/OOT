@@ -14,8 +14,10 @@
 
 A build of Frizti's Fritchii and zortos293's Lichii (see Credits) dedicated to The Legend
 of Zelda: Ocarina of Time on Switch 2 (program id
-0400486024DEC000). Launched without arguments, `OOT Remake.exe` asks once for your dump (NSP/XCI
-or the exefs `main`) and then boots it directly. The built-in Max Resolution and Dynamic FPS
+0400486024DEC000). Launched without arguments, `OOT Remake.exe` opens a home screen for the
+game: its icon, title and version read from your dump (NSP/XCI/NUP or the exefs `main`, asked
+once), a Play button and quick settings (frame rate, resolution, fullscreen, anti-aliasing,
+volume, controller). The built-in Max Resolution and Dynamic FPS
 patches are applied to build E0F3CCFAF50065AE4EA01EB5AEB13B1A45DA3348. Keys, firmware and the
 game are not included: use your own dump.
 

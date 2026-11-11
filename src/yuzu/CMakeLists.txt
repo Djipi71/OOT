@@ -173,6 +173,8 @@ add_executable(yuzu
     loading_screen.cpp
     loading_screen.h
     loading_screen.ui
+    oot_home.cpp
+    oot_home.h
 
     main.cpp
 

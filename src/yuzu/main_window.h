@@ -69,6 +69,7 @@ class ConfigurePostProcessing;
 enum class GameListOpenTarget;
 enum class DumpRomFSTarget;
 class GameListPlaceholder;
+class OotHome;
 namespace FritchiiUi {
 class Home;
 }
@@ -384,11 +385,15 @@ private slots:
     void OnLinkToRyujinx(const u64& program_id);
     void OnMenuLoadFile();
     void BootOcarinaOfTime();
+    /// Asks for the Ocarina of Time dump; false when none was chosen.
+    bool ChooseOotDump();
+    void DeleteOotShaderCache();
     void OnMenuLoadFolder();
     void IncrementInstallProgress();
     void OnMenuInstallToNAND();
     void OnMenuRecentFile();
     void OnConfigure();
+    void RunConfigure(bool controls);
     /// Asks whether Ocarina of Time runs at 60 or 30 FPS (Settings::values.oot_30fps).
     void AskOotFrameRate();
     /// Applies the Frizti tuned settings once per revision and undoes other builds' changes to
@@ -573,6 +578,7 @@ private:
 
     GameListPlaceholder* game_list_placeholder = nullptr;
     FritchiiUi::Home* fritchii_home = nullptr;
+    OotHome* oot_home = nullptr;
 
     std::vector<VkDeviceInfo::Record> vk_device_records;
 

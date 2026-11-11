@@ -45,6 +45,7 @@
 #include "util/util.h"
 #include "yuzu/game/game_list.h"
 #include "yuzu/nup_dialogs.h"
+#include "yuzu/oot_home.h"
 #include "yuzu/shader_warm_dialog.h"
 #ifdef LICHII_NX_TOOLS
 #include "core/file_sys/registered_cache.h"
@@ -114,6 +115,7 @@
 
 #include "qt_common/util/content.h"
 #include "qt_common/util/fs.h"
+#include "qt_common/util/game.h"
 #include "qt_common/util/meta.h"
 #include "qt_common/util/mod.h"
 #include "qt_common/util/path.h"
@@ -565,8 +567,8 @@ MainWindow::MainWindow(bool has_broken_vulkan)
                 LibraryAppletParameters(0x010000000000100Dull, Service::AM::AppletId::QLaunch));
         }
     } else {
-        // OOT Remake: no arguments starts Ocarina of Time directly, once the window is up.
-        QTimer::singleShot(0, this, &MainWindow::BootOcarinaOfTime);
+        // OOT Remake: no arguments shows the home screen; its Play button starts the game.
+        QTimer::singleShot(0, oot_home, &OotHome::Refresh);
     }
 
     // The first launch asks for Ocarina of Time's frame rate (not when started with a game,
@@ -1089,6 +1091,29 @@ void MainWindow::InitializeWidgets() {
     game_list_placeholder = new GameListPlaceholder(this);
     ui->horizontalLayout->addWidget(game_list_placeholder);
     game_list_placeholder->setVisible(false);
+
+    // OOT Remake: the home screen takes the game list's place; the list keeps running unseen.
+    game_list->hide();
+    oot_home = new OotHome(
+        this,
+        {.play = [this] { BootOcarinaOfTime(); },
+         .choose_dump = [this] { ChooseOotDump(); },
+         .delete_shader_cache = [this] { DeleteOotShaderCache(); },
+         .open_settings = [this] { OnConfigure(); },
+         .open_controls = [this] { RunConfigure(true); },
+         .settings_changed =
+             [this] {
+                 UpdateOotFpsButton();
+                 UpdateStatusButtons();
+                 config->SaveAllValues();
+             },
+         .fullscreen = [this] { return ui->action_Fullscreen->isChecked(); },
+         .set_fullscreen =
+             [this](bool on) {
+                 ui->action_Fullscreen->setChecked(on);
+                 UISettings::values.fullscreen = on;
+             }});
+    ui->horizontalLayout->addWidget(oot_home);
 
     loading_screen = new LoadingScreen(this);
     loading_screen->hide();
@@ -2329,6 +2354,7 @@ void MainWindow::BootGame(const QString& filename, Service::AM::FrontendAppletPa
     if (ui->action_Single_Window_Mode->isChecked()) {
         game_list->hide();
         game_list_placeholder->hide();
+        oot_home->hide();
     }
     status_bar_update_timer.start(500);
     renderer_status_button->setDisabled(true);
@@ -2542,12 +2568,8 @@ void MainWindow::OnEmulationStopped() {
     render_window->hide();
     loading_screen->hide();
     loading_screen->Clear();
-    if (game_list->IsEmpty()) {
-        game_list_placeholder->show();
-    } else {
-        game_list->show();
-    }
-    game_list->SetFilterFocus();
+    oot_home->Refresh();
+    oot_home->show();
     tas_label->clear();
     input_subsystem->GetTas()->Stop();
     OnTasStateChanged();
@@ -3102,8 +3124,8 @@ void MainWindow::OnGameListAddDirectory() {
 void MainWindow::OnGameListShowList(bool show) {
     if (emulation_running && ui->action_Single_Window_Mode->isChecked())
         return;
-    game_list->setVisible(show);
-    game_list_placeholder->setVisible(!show);
+    // OOT Remake: the home screen stays in place of the game list.
+    static_cast<void>(show);
 };
 
 void MainWindow::OnGameListOpenPerGameProperties(const std::string& file) {
@@ -3193,27 +3215,61 @@ void MainWindow::OnMenuLoadFile() {
 }
 
 void MainWindow::BootOcarinaOfTime() {
-    QString path = QString::fromStdString(UISettings::values.oot_game_path);
+    const QString path = QString::fromStdString(UISettings::values.oot_game_path);
     if (path.isEmpty() || !QFileInfo::exists(path)) {
+        if (ChooseOotDump()) {
+            BootOcarinaOfTime();
+        }
+        return;
+    }
+    BootGame(path, ApplicationAppletParameters());
+}
+
+bool MainWindow::ChooseOotDump() {
+    if (emulation_running) {
+        return false;
+    }
+    if (UISettings::values.oot_game_path.empty()) {
         QMessageBox::information(
             this, tr("OOT Remake"),
             tr("Select your dump of The Legend of Zelda: Ocarina of Time (Switch 2): the game "
                "file (NSP/XCI/NUP) or the 'main' file inside its exefs folder.\n\n"
                "Your keys and firmware must already be installed."));
-        const QString extensions =
-            QStringLiteral("*.")
-                .append(QtCommon::supported_file_extensions.join(QStringLiteral(" *.")))
-                .append(QStringLiteral(" main"));
-        path = QFileDialog::getOpenFileName(
-            this, tr("Ocarina of Time"), QString::fromStdString(UISettings::values.roms_path),
-            tr("Switch Executable (%1);;All Files (*.*)").arg(extensions));
-        if (path.isEmpty()) {
-            return;
-        }
-        UISettings::values.oot_game_path = path.toStdString();
-        UISettings::values.roms_path = QFileInfo(path).path().toStdString();
     }
-    BootGame(path, ApplicationAppletParameters());
+    const QString extensions =
+        QStringLiteral("*.")
+            .append(QtCommon::supported_file_extensions.join(QStringLiteral(" *.")))
+            .append(QStringLiteral(" main"));
+    const QString path = QFileDialog::getOpenFileName(
+        this, tr("Ocarina of Time"), QString::fromStdString(UISettings::values.roms_path),
+        tr("Switch Executable (%1);;All Files (*.*)").arg(extensions));
+    if (path.isEmpty()) {
+        return false;
+    }
+    UISettings::values.oot_game_path = path.toStdString();
+    UISettings::values.roms_path = QFileInfo(path).path().toStdString();
+    config->SaveAllValues();
+    oot_home->Refresh();
+    return true;
+}
+
+void MainWindow::DeleteOotShaderCache() {
+    constexpr u64 OcarinaOfTime = 0x0400486024DEC000ULL;
+    const QString title = tr("Delete Shader Cache");
+    if (emulation_running || boot_in_progress) {
+        QMessageBox::information(this, title, tr("Stop the game first."));
+        return;
+    }
+    QMessageBox box(QMessageBox::Warning, title, tr("Delete OoT's shader cache?"),
+                    QMessageBox::NoButton, this);
+    box.setInformativeText(tr("Only if the game crashes or looks wrong because of it. The "
+                              "shaders are prepared again on the next start."));
+    QPushButton* remove = box.addButton(tr("Delete"), QMessageBox::DestructiveRole);
+    box.setDefaultButton(box.addButton(QMessageBox::Cancel));
+    box.exec();
+    if (box.clickedButton() == remove) {
+        QtCommon::Game::RemoveAllTransferableShaderCaches(OcarinaOfTime);
+    }
 }
 
 void MainWindow::OnMenuLoadFolder() {
@@ -3740,7 +3796,7 @@ void MainWindow::ToggleWindowMode() {
         if (emulation_running) {
             render_window->setVisible(true);
             render_window->setFocus();
-            game_list->hide();
+            oot_home->hide();
         }
 
     } else {
@@ -3751,7 +3807,7 @@ void MainWindow::ToggleWindowMode() {
         if (emulation_running) {
             render_window->setVisible(true);
             render_window->RestoreGeometry();
-            game_list->show();
+            oot_home->show();
         }
     }
 }
@@ -3868,6 +3924,10 @@ void MainWindow::ToggleShowGameName() {
 }
 
 void MainWindow::OnConfigure() {
+    RunConfigure(false);
+}
+
+void MainWindow::RunConfigure(bool controls) {
     const auto old_theme = UISettings::values.theme;
     const bool old_discord_presence = UISettings::values.enable_discord_presence.GetValue();
     const auto old_language_index = Settings::values.language_index.GetValue();
@@ -3882,6 +3942,13 @@ void MainWindow::OnConfigure() {
                                      !multiplayer_state->IsHostingPublicRoom());
     connect(&configure_dialog, &ConfigureDialog::LanguageChanged, this,
             &MainWindow::OnLanguageChanged);
+    if (controls) {
+        configure_dialog.ShowControls();
+    }
+    // Whatever the dialog changed, the home screen shows it once it closes.
+    SCOPE_EXIT {
+        oot_home->Refresh();
+    };
     connect(&configure_dialog, &ConfigureDialog::ExternalContentDirsChanged, this,
             &MainWindow::OnGameListRefresh);
 
@@ -5415,6 +5482,9 @@ void MainWindow::UpdateOotFpsButton() {
     const bool fps30 = Settings::values.oot_30fps.GetValue();
     oot_fps_button->setChecked(fps30);
     oot_fps_button->setText(fps30 ? tr("30 FPS") : tr("60 FPS"));
+    if (oot_home != nullptr) {
+        oot_home->Refresh();
+    }
 }
 
 void MainWindow::OnToggleOotFrameRate() {
