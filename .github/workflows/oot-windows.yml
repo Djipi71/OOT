@@ -75,7 +75,15 @@ jobs:
 
       - name: Install Vulkan SDK
         shell: pwsh
-        run: ./tools/windows/install-vulkan-sdk.ps1
+        # The LunarG download drops now and then: retry with a growing delay.
+        run: |
+          for ($attempt = 1; ; $attempt++) {
+            try { ./tools/windows/install-vulkan-sdk.ps1; if ($LASTEXITCODE -eq 0 -or $null -eq $LASTEXITCODE) { break } }
+            catch { Write-Host "Vulkan SDK install failed ($_)" }
+            if ($attempt -ge 5) { throw "Vulkan SDK could not be installed" }
+            Write-Host "retry $attempt"
+            Start-Sleep -Seconds (30 * $attempt)
+          }
 
       - name: Restore CPM downloads
         id: cpm-cache
