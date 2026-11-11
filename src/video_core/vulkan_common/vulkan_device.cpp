@@ -27,11 +27,13 @@
 #include <ranges>
 #include "common/settings.h"
 #include "common/settings_enums.h"
+#include "video_core/churn_counters.h"
 #include "video_core/nx2_debug_control.h"
 #include "video_core/nx2_profile.h"
 #include "video_core/vulkan_common/nsight_aftermath_tracker.h"
 #include "video_core/vulkan_common/vma.h"
 #include "video_core/vulkan_common/vulkan_device.h"
+#include "video_core/nx2_perf.h"
 #include "video_core/vulkan_common/vulkan_wrapper.h"
 #include "video_core/gpu_logging/gpu_logging.h"
 #ifdef EGLANTINE_STREAMLINE
@@ -495,6 +497,19 @@ void Device::RemoveExtensionFeatureIfUnsuitable(bool is_suitable, Feature& featu
     }
 }
 
+namespace {
+/// AMD FSR 4 runs AMD's own shaders inside AMD's runtime (Windows, AMD's driver). They need
+/// float16 and, on RDNA 4, float8 on the device; the emulator's shaders use neither for it.
+bool WantsAmdFsr4(VkDriverId driver_id) {
+#ifdef _WIN32
+    return driver_id == VK_DRIVER_ID_AMD_PROPRIETARY &&
+           Settings::values.oot_anti_aliasing.GetValue() == Settings::OotAntiAliasing::Fsr4;
+#else
+    return false;
+#endif
+}
+} // Anonymous namespace
+
 Device::Device(VkInstance instance_, vk::PhysicalDevice physical_, VkSurfaceKHR surface,
                const vk::InstanceDispatch& dld_)
     : instance{instance_}, dld{dld_}, physical{physical_},
@@ -632,7 +647,6 @@ Device::Device(VkInstance instance_, vk::PhysicalDevice physical_, VkSurfaceKHR 
         const auto arch = GetNvidiaArch();
         if (arch >= NvidiaArchitecture::Arch_AmpereOrNewer) {
             LOG_WARNING(Render_Vulkan, "Ampere and newer have broken float16 math");
-            host_float16_supported = features.shader_float16_int8.shaderFloat16;
             features.shader_float16_int8.shaderFloat16 = false;
         }
 
@@ -659,6 +673,7 @@ Device::Device(VkInstance instance_, vk::PhysicalDevice physical_, VkSurfaceKHR 
     // off for newer AMD drivers below: checked after that, every AMD GPU looked like GCN4 and lost
     // VK_EXT_sampler_filter_minmax (an RDNA3 Radeon 780M logged it).
     const bool amd_gcn4_or_older = is_amd && !features.shader_float16_int8.shaderFloat16;
+    const bool device_float16 = features.shader_float16_int8.shaderFloat16;
     if (is_amd_driver) {
         // AMD drivers need a higher amount of Sets per Pool in certain circumstances like in XC2.
         sets_per_pool = 96;
@@ -801,11 +816,9 @@ Device::Device(VkInstance instance_, vk::PhysicalDevice physical_, VkSurfaceKHR 
         LOG_INFO(Render_Vulkan, "VK_KHR_cooperative_matrix enabled for guest tensor operations");
     }
 
-    // The Ampere workaround above only concerns guest shaders: enable float16 on the device so
-    // host-only shaders (frame generation) may use it. The AMD and Intel workarounds turn it off
-    // for every shader, host ones included.
-    host_float16_supported |= float16_math;
-    if (host_float16_supported) {
+    // AMD FSR 4 runs AMD's own shaders inside AMD's runtime, which need float16 on the device.
+    // Guest shaders still follow float16_math, so the AMD float16 workaround above stays in force.
+    if (device_float16 && WantsAmdFsr4(driver_id)) {
         features.shader_float16_int8.shaderFloat16 = VK_TRUE;
     }
     logical = vk::Device::Create(physical, queue_cis, ExtensionListForVulkan(loaded_extensions), first_next, dld);
@@ -844,6 +857,17 @@ Device::Device(VkInstance instance_, vk::PhysicalDevice physical_, VkSurfaceKHR 
             }
         }
     }
+    // Counts the allocator's vkAllocateMemory / vkFreeMemory calls (blocks and dedicated
+    // memory) for the "Churn (600 frames)" line.
+    static const VmaDeviceMemoryCallbacks churn_callbacks{
+        .pfnAllocate = [](VmaAllocator, uint32_t, VkDeviceMemory, VkDeviceSize, void*) {
+            VideoCommon::Churn::Add(VideoCommon::Churn::DeviceAllocations);
+        },
+        .pfnFree = [](VmaAllocator, uint32_t, VkDeviceMemory, VkDeviceSize, void*) {
+            VideoCommon::Churn::Add(VideoCommon::Churn::DeviceFrees);
+        },
+        .pUserData = nullptr,
+    };
     const VmaAllocatorCreateInfo allocator_info{
             .flags = flags,
             .physicalDevice = physical,
@@ -857,7 +881,7 @@ Device::Device(VkInstance instance_, vk::PhysicalDevice physical_, VkSurfaceKHR 
             // block (8 MiB) their own memory, which goes back to the driver when they are freed.
             .preferredLargeHeapBlockSize = 16u * 1024u * 1024u,
             .pAllocationCallbacks = nullptr,
-            .pDeviceMemoryCallbacks = nullptr,
+            .pDeviceMemoryCallbacks = &churn_callbacks,
             .pHeapSizeLimit = heap_size_limit != 0 ? heap_size_limits.data() : nullptr,
             .pVulkanFunctions = &functions,
             .instance = instance,
@@ -1030,78 +1054,9 @@ VkFormat Device::GetSupportedFormat(VkFormat wanted_format, VkFormatFeatureFlags
 
 void Device::ReportLoss() const {
     LOG_CRITICAL(Render_Vulkan, "Device loss occurred!");
-    ReportDeviceFault();
 
     // Wait for the log to flush and for Nsight Aftermath to dump the results
     std::this_thread::sleep_for(std::chrono::seconds{15});
-}
-
-void Device::ReportDeviceFault() const {
-    if (!device_fault_features.deviceFault || !dld.vkGetDeviceFaultInfoEXT) {
-        LOG_CRITICAL(Render_Vulkan, "Device fault info: not supported by the driver");
-        return;
-    }
-    VkDeviceFaultCountsEXT counts{.sType = VK_STRUCTURE_TYPE_DEVICE_FAULT_COUNTS_EXT};
-    VkResult result = dld.vkGetDeviceFaultInfoEXT(*logical, &counts, nullptr);
-    if (result != VK_SUCCESS) {
-        LOG_CRITICAL(Render_Vulkan, "Device fault info: query failed ({})",
-                     static_cast<int>(result));
-        return;
-    }
-    std::vector<VkDeviceFaultAddressInfoEXT> addresses(counts.addressInfoCount);
-    std::vector<VkDeviceFaultVendorInfoEXT> vendor_infos(counts.vendorInfoCount);
-    counts.vendorBinarySize = 0;
-    VkDeviceFaultInfoEXT info{
-        .sType = VK_STRUCTURE_TYPE_DEVICE_FAULT_INFO_EXT,
-        .pAddressInfos = addresses.data(),
-        .pVendorInfos = vendor_infos.data(),
-    };
-    result = dld.vkGetDeviceFaultInfoEXT(*logical, &counts, &info);
-    if (result != VK_SUCCESS && result != VK_INCOMPLETE) {
-        LOG_CRITICAL(Render_Vulkan, "Device fault info: query failed ({})",
-                     static_cast<int>(result));
-        return;
-    }
-    LOG_CRITICAL(Render_Vulkan, "Device fault: {} ({} addresses, {} vendor records)",
-                 info.description, counts.addressInfoCount, counts.vendorInfoCount);
-    for (u32 i = 0; i < counts.addressInfoCount; ++i) {
-        const VkDeviceFaultAddressInfoEXT& address = addresses[i];
-        const char* type = "unknown";
-        switch (address.addressType) {
-        case VK_DEVICE_FAULT_ADDRESS_TYPE_NONE_EXT:
-            type = "none";
-            break;
-        case VK_DEVICE_FAULT_ADDRESS_TYPE_READ_INVALID_EXT:
-            type = "invalid read";
-            break;
-        case VK_DEVICE_FAULT_ADDRESS_TYPE_WRITE_INVALID_EXT:
-            type = "invalid write";
-            break;
-        case VK_DEVICE_FAULT_ADDRESS_TYPE_EXECUTE_INVALID_EXT:
-            type = "invalid execute";
-            break;
-        case VK_DEVICE_FAULT_ADDRESS_TYPE_INSTRUCTION_POINTER_UNKNOWN_EXT:
-            type = "instruction pointer (unknown)";
-            break;
-        case VK_DEVICE_FAULT_ADDRESS_TYPE_INSTRUCTION_POINTER_INVALID_EXT:
-            type = "instruction pointer (invalid)";
-            break;
-        case VK_DEVICE_FAULT_ADDRESS_TYPE_INSTRUCTION_POINTER_FAULT_EXT:
-            type = "instruction pointer (fault)";
-            break;
-        default:
-            break;
-        }
-        const VkDeviceSize precision = (std::max)(address.addressPrecision, VkDeviceSize{1});
-        const VkDeviceSize lower = address.reportedAddress & ~(precision - 1);
-        LOG_CRITICAL(Render_Vulkan, "Device fault address {}: {} at {:#x} (range [{:#x}, {:#x}))",
-                     i, type, address.reportedAddress, lower, lower + precision);
-    }
-    for (u32 i = 0; i < counts.vendorInfoCount; ++i) {
-        const VkDeviceFaultVendorInfoEXT& vendor = vendor_infos[i];
-        LOG_CRITICAL(Render_Vulkan, "Device fault vendor record {}: {} (code {:#x}, data {:#x})", i,
-                     vendor.description, vendor.vendorFaultCode, vendor.vendorFaultData);
-    }
 }
 
 void Device::SaveShader(std::span<const u32> spirv) const {
@@ -1249,6 +1204,42 @@ bool Device::GetSuitability(bool requires_swapchain) {
     FOR_EACH_VK_FEATURE_EXT(FEATURE_EXTENSION);
     FOR_EACH_VK_EXTENSION(EXTENSION);
 
+    // Graphics pipelines linked from per-stage libraries (vk_pipeline_library): the Shader
+    // libraries setting turns them on for NVIDIA GPUs and AMD's Mesa driver (Intel and others are
+    // untested), EDEN_NX2_GPL=1 for any GPU, EDEN_NX2_GPL=0 turns them off. Not on AMD's Windows
+    // driver: RX 5000 and 6000 owners crash building library pipelines from their cache
+    // (amdvlk64.dll; unticking Shader libraries is their workaround, 2026-11-09), and the
+    // precompile preparation now does the first-time builds those libraries were for.
+    graphics_pipeline_library_requested = [this] {
+        if (const char* value = std::getenv("EDEN_NX2_GPL"); value && *value) {
+            return *value != '0';
+        }
+        const u32 vendor = properties.properties.vendorID;
+        // Not properties.driver: it is read further down (it was 0 here, and v5.2 left the
+        // libraries on for these cards). On Windows AMD's Vulkan driver is the proprietary one.
+#ifdef _WIN32
+        constexpr bool amd_windows_driver = true;
+#else
+        constexpr bool amd_windows_driver = false;
+#endif
+        if (vendor == 0x1002 && amd_windows_driver &&
+            Settings::values.use_graphics_pipeline_library.GetValue()) {
+            LOG_INFO(Render_Vulkan, "Nx2Perf gpl: shader libraries off on AMD's proprietary "
+                                    "driver (EDEN_NX2_GPL=1 turns them on)");
+            return false;
+        }
+        return Settings::values.use_graphics_pipeline_library.GetValue() &&
+               (vendor == 0x10DE || vendor == 0x1002);
+    }();
+    if (graphics_pipeline_library_requested &&
+        supported_extensions.contains(VK_EXT_GRAPHICS_PIPELINE_LIBRARY_EXTENSION_NAME) &&
+        supported_extensions.contains(VK_KHR_PIPELINE_LIBRARY_EXTENSION_NAME)) {
+        loaded_extensions.insert(VK_EXT_GRAPHICS_PIPELINE_LIBRARY_EXTENSION_NAME);
+        loaded_extensions.insert(VK_KHR_PIPELINE_LIBRARY_EXTENSION_NAME);
+    } else {
+        graphics_pipeline_library_requested = false;
+    }
+
     extensions.depth_stencil_resolve =
         extensions.depth_stencil_resolve &&
         (instance_version >= VK_API_VERSION_1_2 || extensions.create_renderpass2);
@@ -1361,21 +1352,14 @@ bool Device::GetSuitability(bool requires_swapchain) {
 #undef EXT_FEATURE
 #undef FEATURE
 
-    // VK_EXT_device_fault: what the driver knows about a device loss (ReportLoss).
-    const bool has_device_fault_extension =
-        supported_extensions.contains(VK_EXT_DEVICE_FAULT_EXTENSION_NAME);
-    if (has_device_fault_extension) {
-        device_fault_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FAULT_FEATURES_EXT;
-        SetNext(next, device_fault_features);
+    if (graphics_pipeline_library_requested) {
+        graphics_pipeline_library_features.sType =
+            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_GRAPHICS_PIPELINE_LIBRARY_FEATURES_EXT;
+        SetNext(next, graphics_pipeline_library_features);
     }
 
     // Perform the feature test.
     physical.GetFeatures2(features2);
-
-    if (has_device_fault_extension) {
-        loaded_extensions.insert(VK_EXT_DEVICE_FAULT_EXTENSION_NAME);
-        device_fault_features.deviceFaultVendorBinary = VK_FALSE;
-    }
 
     // Base Vulkan 1.0 features are always valid regardless of instance version.
     features.features = features2.features;
@@ -1474,6 +1458,12 @@ bool Device::GetSuitability(bool requires_swapchain) {
         properties.integer_dot_product.sType =
             VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_INTEGER_DOT_PRODUCT_PROPERTIES;
         SetNext(next, properties.integer_dot_product);
+    }
+
+    if (graphics_pipeline_library_requested) {
+        properties.graphics_pipeline_library.sType =
+            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_GRAPHICS_PIPELINE_LIBRARY_PROPERTIES_EXT;
+        SetNext(next, properties.graphics_pipeline_library);
     }
 
     // Perform the property fetch.
@@ -1748,14 +1738,66 @@ void Device::RemoveUnsuitableExtensions() {
     features.mesh_shader.primitiveFragmentShadingRateMeshShader = VK_FALSE;
     features.mesh_shader.meshShaderQueries = VK_FALSE;
     extensions.mesh_shader = features.mesh_shader.taskShader && features.mesh_shader.meshShader;
+    // EDEN_NX2_NO_DYNAMIC_LOGIC_OP=1: no dynamic logic op, as AMD's Windows driver (tests the
+    // conversion of NVIDIA-recorded precompiled pipelines on an NVIDIA GPU).
+    if (features.extended_dynamic_state2.extendedDynamicState2LogicOp &&
+        std::getenv("EDEN_NX2_NO_DYNAMIC_LOGIC_OP") != nullptr) {
+        LOG_WARNING(Render_Vulkan, "EDEN_NX2_NO_DYNAMIC_LOGIC_OP: dynamic logic op disabled");
+        features.extended_dynamic_state2.extendedDynamicState2LogicOp = VK_FALSE;
+    }
     // EDEN_NX2_FORCE_MESH_FALLBACK=1: leave VK_EXT_mesh_shader disabled, so task/mesh draws take
     // the compute fallback a device without it uses.
     if (extensions.mesh_shader && std::getenv("EDEN_NX2_FORCE_MESH_FALLBACK") != nullptr) {
         LOG_WARNING(Render_Vulkan, "EDEN_NX2_FORCE_MESH_FALLBACK: VK_EXT_mesh_shader disabled");
         extensions.mesh_shader = false;
     }
+    // The Mesh Shaders setting. Automatic leaves the extension disabled on AMD drivers: native
+    // task/mesh draws hang AMD GPUs (#316, #670, #672, #871). RADV resets the GPU on RX 6000, 7000
+    // and 9000 cards (Mesa 26.0 to 27.0-devel; 26.2.6 still hangs, though it recovers more often),
+    // and AMD's own driver times out on the Radeon 780M. The compute fallback avoids the hangs, but
+    // it can be slower in scenes full of foliage and skips the mesh programs it can't run
+    // (per-primitive outputs, primitives other than triangles, layered output). Native keeps the
+    // extension, for a setup that no longer hangs; Compute disables it on every device.
+    const Settings::MeshShaderMode mesh_mode = Settings::values.mesh_shaders.GetValue();
+    const VkDriverId mesh_driver = properties.driver.driverID;
+    const bool amd_mesh_driver = mesh_driver == VK_DRIVER_ID_MESA_RADV ||
+                                 mesh_driver == VK_DRIVER_ID_AMD_PROPRIETARY ||
+                                 mesh_driver == VK_DRIVER_ID_AMD_OPEN_SOURCE;
+    if (extensions.mesh_shader && mesh_mode == Settings::MeshShaderMode::Compute) {
+        LOG_INFO(Render_Vulkan, "Mesh Shaders setting: task/mesh draws use the compute fallback");
+        extensions.mesh_shader = false;
+    } else if (extensions.mesh_shader && mesh_mode == Settings::MeshShaderMode::Automatic &&
+               amd_mesh_driver) {
+        LOG_INFO(Render_Vulkan, "AMD driver: task/mesh draws use the compute fallback, because "
+                                "native mesh draws hang the GPU (Mesh Shaders: Native keeps them)");
+        extensions.mesh_shader = false;
+    }
     RemoveExtensionFeatureIfUnsuitable(extensions.mesh_shader, features.mesh_shader,
                                        VK_EXT_MESH_SHADER_EXTENSION_NAME);
+
+    // VK_EXT_graphics_pipeline_library (EDEN_NX2_GPL): used only with fast linking, which makes
+    // a link cost a fraction of a millisecond.
+    if (graphics_pipeline_library_requested) {
+        const bool usable =
+            graphics_pipeline_library_features.graphicsPipelineLibrary &&
+            properties.graphics_pipeline_library.graphicsPipelineLibraryFastLinking;
+        if (!usable) {
+            LOG_WARNING(Render_Vulkan,
+                        "Nx2Perf gpl: the device has no graphics pipeline library fast linking, "
+                        "shader libraries off");
+            loaded_extensions.erase(VK_EXT_GRAPHICS_PIPELINE_LIBRARY_EXTENSION_NAME);
+            loaded_extensions.erase(VK_KHR_PIPELINE_LIBRARY_EXTENSION_NAME);
+            graphics_pipeline_library_features.graphicsPipelineLibrary = VK_FALSE;
+        }
+        graphics_pipeline_library_enabled = usable;
+        if (usable) {
+            LOG_INFO(Render_Vulkan,
+                     "Nx2Perf gpl: graphics pipeline libraries on (fast linking, independent "
+                     "interpolation decoration {})",
+                     properties.graphics_pipeline_library
+                         .graphicsPipelineLibraryIndependentInterpolationDecoration);
+        }
+    }
 
     // VK_KHR_shader_quad_control
     // Quad control depends on maximal reconvergence; advertise neither unless
@@ -1777,23 +1819,6 @@ void Device::RemoveUnsuitableExtensions() {
     // The guest's own M=16 N=8 K=16 shape is preferred; without it, a 16x16x16 shape runs HMMA
     // through shared memory with the compute subgroups forced to 32 lanes.
     {
-        // The instance may expose this entry point even when the selected physical device
-        // does not support VK_KHR_cooperative_matrix. Query only eligible devices.
-        std::vector<VkCooperativeMatrixPropertiesKHR> shapes;
-        if (extensions.cooperative_matrix) {
-            shapes = physical.GetCooperativeMatrixPropertiesKHR();
-        }
-        const auto has_shape = [&](u32 columns) {
-            return std::ranges::any_of(shapes, [=](const VkCooperativeMatrixPropertiesKHR& shape) {
-                return shape.MSize == 16 && shape.NSize == columns && shape.KSize == 16 &&
-                       shape.AType == VK_COMPONENT_TYPE_FLOAT16_KHR &&
-                       shape.BType == VK_COMPONENT_TYPE_FLOAT16_KHR &&
-                       shape.CType == VK_COMPONENT_TYPE_FLOAT16_KHR &&
-                       shape.ResultType == VK_COMPONENT_TYPE_FLOAT16_KHR &&
-                       shape.saturatingAccumulation == VK_FALSE &&
-                       shape.scope == VK_SCOPE_SUBGROUP_KHR;
-            });
-        };
         // AMD's driver also advertises the extension on GPUs without matrix cores (GCN, RDNA1,
         // RDNA2) and crashes in amdvlk64.dll building these pipelines on RDNA2. RDNA3 brought
         // matrix cores together with accelerated mixed-signedness dot4, which the driver reports.
@@ -1830,8 +1855,22 @@ void Device::RemoveUnsuitableExtensions() {
                             features.vulkan_memory_model.vulkanMemoryModelDeviceScope &&
                             extensions.subgroup_size_control &&
                             features.subgroup_size_control.computeFullSubgroups;
+        // Gated-off devices are not asked for their shapes.
+        const auto shapes = usable ? physical.GetCooperativeMatrixPropertiesKHR()
+                                   : std::vector<VkCooperativeMatrixPropertiesKHR>{};
+        const auto has_shape = [&](u32 rows, u32 columns) {
+            return std::ranges::any_of(shapes, [=](const VkCooperativeMatrixPropertiesKHR& shape) {
+                return shape.MSize == rows && shape.NSize == columns && shape.KSize == 16 &&
+                       shape.AType == VK_COMPONENT_TYPE_FLOAT16_KHR &&
+                       shape.BType == VK_COMPONENT_TYPE_FLOAT16_KHR &&
+                       shape.CType == VK_COMPONENT_TYPE_FLOAT16_KHR &&
+                       shape.ResultType == VK_COMPONENT_TYPE_FLOAT16_KHR &&
+                       shape.saturatingAccumulation == VK_FALSE &&
+                       shape.scope == VK_SCOPE_SUBGROUP_KHR;
+            });
+        };
         cooperative_hmma_16x8x16 =
-            usable && has_shape(8) &&
+            usable && has_shape(16, 8) &&
             (properties.subgroup_properties.supportedStages & VK_SHADER_STAGE_COMPUTE_BIT) != 0 &&
             properties.subgroup_properties.subgroupSize == GuestWarpSize &&
             // Compute subgroups may vary between these sizes (always with SPIR-V 1.6), and the
@@ -1839,13 +1878,25 @@ void Device::RemoveUnsuitableExtensions() {
             properties.subgroup_size_control.minSubgroupSize == GuestWarpSize &&
             properties.subgroup_size_control.maxSubgroupSize == GuestWarpSize;
         cooperative_hmma_16x16x16 =
-            usable && has_shape(16) && IsGuestWarpSizeSupported(VK_SHADER_STAGE_COMPUTE_BIT);
-        extensions.cooperative_matrix = cooperative_hmma_16x8x16 || cooperative_hmma_16x16x16;
+            usable && has_shape(16, 16) && IsGuestWarpSizeSupported(VK_SHADER_STAGE_COMPUTE_BIT);
+        // Intel Xe2 (ANV) only has 8x16x16: each HMMA is two products of 8 rows. Intel only, so
+        // NVIDIA and AMD keep exactly the paths above (zortos293/Lichii#779). Not Intel's Windows
+        // driver: the constructor turns its shaderFloat16 off after this check ("Intel has broken
+        // float16 math"), and the matrices need it; #779 was measured on Mesa ANV.
+        constexpr u32 intel_vendor_id = 0x8086;
+        cooperative_hmma_8x16x16 =
+            usable && properties.properties.vendorID == intel_vendor_id &&
+            driver_id != VK_DRIVER_ID_INTEL_PROPRIETARY_WINDOWS && has_shape(8, 16) &&
+            IsGuestWarpSizeSupported(VK_SHADER_STAGE_COMPUTE_BIT);
+        extensions.cooperative_matrix =
+            cooperative_hmma_16x8x16 || cooperative_hmma_16x16x16 || cooperative_hmma_8x16x16;
         features.cooperative_matrix.cooperativeMatrixRobustBufferAccess = VK_FALSE;
         RemoveExtensionFeatureIfUnsuitable(extensions.cooperative_matrix,
                                            features.cooperative_matrix,
                                            VK_KHR_COOPERATIVE_MATRIX_EXTENSION_NAME);
     }
+    VideoCommon::Nx2Perf::g_native_tensor_ops.store(extensions.cooperative_matrix,
+                                                    std::memory_order_relaxed);
 
     // VK_KHR_workgroup_memory_explicit_layout
     extensions.workgroup_memory_explicit_layout =
@@ -1876,6 +1927,14 @@ void Device::RemoveUnsuitableExtensions() {
     extensions.maintenance5 = features.maintenance5.maintenance5;
     RemoveExtensionFeatureIfUnsuitable(extensions.maintenance5, features.maintenance5,
                                        VK_KHR_MAINTENANCE_5_EXTENSION_NAME);
+
+    // VK_EXT_shader_float8, only for AMD FSR 4: its RDNA 4 network runs in FP8 and drew a black
+    // picture without the feature on the device (found by CheezerWheezer).
+    if (extensions.shader_float8 &&
+        (!features.shader_float8.shaderFloat8 || !WantsAmdFsr4(properties.driver.driverID))) {
+        RemoveExtensionFeature(extensions.shader_float8, features.shader_float8,
+                               VK_EXT_SHADER_FLOAT8_EXTENSION_NAME);
+    }
 
     // VK_KHR_maintenance6
     extensions.maintenance6 = features.maintenance6.maintenance6;

@@ -16,6 +16,7 @@
 #include <utility>
 #include <queue>
 #include <source_location>
+#include <span>
 #include <vector>
 
 #include "common/alignment.h"
@@ -43,6 +44,7 @@ class Device;
 class Framebuffer;
 class GraphicsPipeline;
 class StateTracker;
+class UploadBatch;
 
 struct QueryCacheParams;
 
@@ -68,6 +70,10 @@ public:
     bool DeferFlush();
     /// Submits deferred work (the split's back, from its idle hook).
     void FlushDeferred();
+    /// The split's back (EDEN_NX2_EXP27 & 8, zortos293/Lichii#717 DISPATCH_BATCH): the work so
+    /// far goes with the next submission, when the back goes idle or when another thread waits
+    /// for it (WaitSubmitted), with no time window. False on other threads (the caller submits).
+    bool DeferFlushUntilWanted();
     /// Threads other than the split's back: waits until tick is submitted, asking the back to
     /// submit deferred work (logged every 2 s while it waits). False only when the back thread
     /// is not running, so nothing will submit it: the caller then submits it itself.
@@ -178,6 +184,10 @@ public:
         on_submit = std::move(func);
     }
 
+    /// Consecutive in-order staging uploads share barriers until their destinations overlap,
+    /// a source depends on a pending copy, or the batch is full. Call outside a render pass.
+    void RecordUpload(VkBuffer src, VkBuffer dst, std::span<const VkBufferCopy> copies);
+
     /// Send work to a separate thread.
     template <typename T>
         requires std::is_invocable_v<T, vk::CommandBuffer, vk::CommandBuffer>
@@ -185,6 +195,11 @@ public:
         if (VideoCommon::GpuSplit::check_owner) [[unlikely]] {
             VideoCommon::GpuSplit::CheckOwner("Scheduler::Record");
         }
+        if (uploads_pending) {
+            // Pending uploads precede every other recorded command, including upload-buffer work.
+            FlushUploads();
+        }
+        ++record_serial;
         if (chunk->Record(command)) {
             return;
         }
@@ -199,6 +214,14 @@ public:
             [command = std::move(c)](vk::CommandBuffer cmdbuf, vk::CommandBuffer) {
                 command(cmdbuf);
             });
+    }
+
+    /// Whether a command was recorded since the last Flush or Finish (EXP61: a flush with nothing
+    /// to submit is skipped).
+    [[nodiscard]] bool RecordedSinceSubmit() const noexcept {
+        // Pending batched uploads (zortos293/Lichii#1245) are recorded work too: EXP61 must not
+        // skip a flush that would send them.
+        return uploads_pending || record_serial != submitted_serial;
     }
 
     /// Whether the recording thread submitted `tick` within 20 ms.
@@ -243,7 +266,7 @@ public:
                 Flush();
             }
             VideoCommon::BackWaitScope wait_scope{"Scheduler::Wait (host GPU execution)"};
-            Common::Nx2Timeline::Span timeline_span{"wait for host GPU"};
+            Common::Nx2Timeline::ArgSpan timeline_span{"wait for host GPU", {"tick", tick}};
             master_semaphore->Wait(tick);
         }
         const auto trace_waited = trace ? std::chrono::steady_clock::now()
@@ -251,7 +274,7 @@ public:
         double trace_requested_ms{};
         double trace_sleep_ms{};
         double trace_slept_ms{};
-        if (Settings::values.use_speed_limit.GetValue() && target_fps > 0.0) {
+        if (Settings::SpeedLimitEnabled() && target_fps > 0.0) {
             auto now = std::chrono::steady_clock::now();
             if (last_target_fps != target_fps) {
                 frame_interval = std::chrono::duration_cast<std::chrono::steady_clock::duration>(std::chrono::duration<double>(1.0 / target_fps));
@@ -299,7 +322,7 @@ public:
                          "cpu_wait_wall_ms={:.3f} pace_requested_ms={:.3f} "
                          "sleep_requested_ms={:.3f} sleep_actual_wall_ms={:.3f} "
                          "pace_actual_wall_ms={:.3f}",
-                         target_fps, Settings::values.use_speed_limit.GetValue(), may_flush,
+                         target_fps, Settings::SpeedLimitEnabled(), may_flush,
                          std::chrono::duration<double, std::milli>(trace_waited - trace_start).count(),
                          trace_requested_ms, trace_sleep_ms, trace_slept_ms,
                          std::chrono::duration<double, std::milli>(end - trace_waited).count());
@@ -317,6 +340,8 @@ public:
 private:
     std::chrono::steady_clock::time_point last_flush{};
     bool flush_pending{};
+    u64 record_serial{};    ///< Commands recorded (RecordWithUploadBuffer)
+    u64 submitted_serial{}; ///< record_serial at the last Flush or Finish
 
     class Command {
     public:
@@ -404,6 +429,9 @@ private:
         VkRenderPass renderpass{};
         VkFramebuffer framebuffer{};
         VkExtent2D render_area = {0, 0};
+        /// The pass is a deferred clear's variant of the framebuffer's render pass that differs
+        /// from it only in load ops, so later draws on that framebuffer can stay in it.
+        bool clear_variant = false;
         GraphicsPipeline* graphics_pipeline = nullptr;
         bool is_rescaling = false;
         bool rescaling_defined = false;
@@ -455,6 +483,11 @@ private:
     bool compute_writes_pending{};
     bool graphics_pipeline_missing{};
     std::unique_ptr<CommandPool> command_pool;
+
+    std::unique_ptr<UploadBatch> upload_batch;
+    bool uploads_pending{};
+    /// Records pending uploads before another command, worker handoff, or submission tick.
+    void FlushUploads();
 
     vk::QueryPool trace_query_pool;
     static constexpr u32 TraceMaxSubmissions = 512;

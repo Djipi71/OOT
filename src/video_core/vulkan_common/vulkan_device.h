@@ -74,6 +74,7 @@ VK_DEFINE_HANDLE(VmaPool)
             primitive_topology_list_restart)                                                       \
     FEATURE(EXT, ProvokingVertex, PROVOKING_VERTEX, provoking_vertex)                              \
     FEATURE(EXT, Robustness2, ROBUSTNESS_2, robustness2)                                           \
+    FEATURE(EXT, ShaderFloat8, SHADER_FLOAT8, shader_float8)                                       \
     FEATURE(EXT, TransformFeedback, TRANSFORM_FEEDBACK, transform_feedback)                        \
     FEATURE(EXT, VertexInputDynamicState, VERTEX_INPUT_DYNAMIC_STATE, vertex_input_dynamic_state)  \
     FEATURE(KHR, CooperativeMatrix, COOPERATIVE_MATRIX, cooperative_matrix)                        \
@@ -257,9 +258,6 @@ public:
     /// Reports a device loss.
     void ReportLoss() const;
 
-    /// Logs what VK_EXT_device_fault reports about a device loss.
-    void ReportDeviceFault() const;
-
     /// Reports a shader to Nsight Aftermath.
     void SaveShader(std::span<const u32> spirv) const;
 
@@ -382,6 +380,22 @@ public:
                id != VK_DRIVER_ID_MESA_RADV;
     }
 
+    /// Whether pipelines linked from graphics pipeline libraries without link time optimization
+    /// draw correctly. On AMD's Windows driver such links draw white fringes around alpha blended
+    /// effects (clouds, particles and glows in a test title, RX 7800 XT), while optimized links
+    /// and monolithic pipelines from the same SPIR-V do not, so libraries are linked optimized
+    /// there. EDEN_NX2_GPL_FAST_LINK=1 allows fast links on any driver, =0 on none.
+    bool CanFastLinkGraphicsLibraries() const {
+        static const char forced = [] {
+            const char* value = std::getenv("EDEN_NX2_GPL_FAST_LINK");
+            return value == nullptr ? '\0' : value[0];
+        }();
+        if (forced == '0' || forced == '1') {
+            return forced == '1';
+        }
+        return GetDriverID() != VK_DRIVER_ID_AMD_PROPRIETARY;
+    }
+
     /// Returns true for tile-based deferred renderers.
     bool IsTiler() const {
         switch (GetDriverID()) {
@@ -497,12 +511,6 @@ FN_MAX_LIMIT_LIST
     /// Returns true if the device supports float16 natively.
     bool IsFloat16Supported() const {
         return float16_math;
-    }
-
-    /// Whether host-only shaders (frame generation) may use float16. Unlike IsFloat16Supported, it
-    /// stays on under the NVIDIA Ampere workaround, which concerns guest shaders only.
-    bool IsHostFloat16Supported() const {
-        return host_float16_supported;
     }
 
     /// Returns true if the device can run shaders built against the Vulkan memory model.
@@ -693,6 +701,12 @@ FN_MAX_LIMIT_LIST
         return cooperative_hmma_16x16x16;
     }
 
+    /// Returns true if the guest's HMMA can run through shared memory as two 8x16x16 cooperative
+    /// matrix products of 16-bit floats, with compute subgroups forced to the guest's 32 lanes.
+    bool IsCooperativeHmma8x16x16Supported() const {
+        return cooperative_hmma_8x16x16;
+    }
+
     /// Returns true if the device supports VK_KHR_shader_quad_control.
     bool IsKhrShaderQuadControlSupported() const {
         return extensions.shader_quad_control && features.shader_quad_control.shaderQuadControl;
@@ -716,6 +730,12 @@ FN_MAX_LIMIT_LIST
     /// Whether presents can carry ids and be waited on until shown (the host frame pacer).
     bool IsKhrPresentWaitSupported() const {
         return extensions.present_id && extensions.present_wait;
+    }
+
+    /// EDEN_NX2_GPL=1 and the device has VK_EXT_graphics_pipeline_library with fast linking:
+    /// graphics pipelines are linked from per-stage libraries.
+    bool IsExtGraphicsPipelineLibrarySupported() const {
+        return graphics_pipeline_library_enabled;
     }
 
     bool IsExtMeshShaderSupported() const {
@@ -1344,6 +1364,7 @@ private:
         VkPhysicalDeviceSubgroupSizeControlProperties subgroup_size_control{};
         VkPhysicalDeviceTransformFeedbackPropertiesEXT transform_feedback{};
         VkPhysicalDeviceMaintenance5PropertiesKHR maintenance5{};
+        VkPhysicalDeviceGraphicsPipelineLibraryPropertiesEXT graphics_pipeline_library{};
         VkPhysicalDeviceDepthStencilResolveProperties depth_stencil_resolve{};
         VkPhysicalDeviceCustomBorderColorPropertiesEXT custom_border_color{};
         VkPhysicalDeviceCooperativeMatrixPropertiesKHR cooperative_matrix{};
@@ -1356,8 +1377,13 @@ private:
     Features features{};
     Properties properties{};
 
+    /// EDEN_NX2_GPL: kept out of the extension tables so a run without the switch creates the
+    /// device exactly as before.
+    bool graphics_pipeline_library_requested{};
+    VkPhysicalDeviceGraphicsPipelineLibraryFeaturesEXT graphics_pipeline_library_features{};
+    bool graphics_pipeline_library_enabled{};
+
     VkPhysicalDeviceFeatures2 features2{};
-    VkPhysicalDeviceFaultFeaturesEXT device_fault_features{};
     VkPhysicalDeviceProperties2 properties2{};
 
     // Misc features
@@ -1368,12 +1394,12 @@ private:
     bool float16_math{};                       ///< Shaders may do float16 arithmetic.
     bool cooperative_hmma_16x8x16{};           ///< HMMA runs on the guest's matrix shape.
     bool cooperative_hmma_16x16x16{};          ///< HMMA runs on 16x16x16 matrices.
+    bool cooperative_hmma_8x16x16{};           ///< HMMA runs on two 8x16x16 products.
     bool is_integrated{};                      ///< Is GPU an iGPU.
     bool is_virtual{};                         ///< Is GPU a virtual GPU.
     bool is_non_gpu{};                         ///< Is SoftwareRasterizer, FPGA, non-GPU device.
     bool has_broken_compute{};                 ///< Compute shaders can cause crashes
     bool has_broken_cube_compatibility{};      ///< Has broken cube compatibility bit
-    bool host_float16_supported{};             ///< shaderFloat16 for host-only shaders
     bool has_broken_descriptor_aliasing{};     ///< Miscompiles descriptors aliased on one binding
     bool has_broken_parallel_compiling{};      ///< Has broken parallel shader compiling.
     bool has_renderdoc{};                      ///< Has RenderDoc attached

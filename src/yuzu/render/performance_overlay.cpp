@@ -10,12 +10,10 @@
 #include <QChart>
 #include <QChartView>
 #include <QGraphicsLayout>
-#include <QGuiApplication>
 #include <QLineSeries>
 #include <QMouseEvent>
 #include <QPainter>
 #include <QValueAxis>
-#include <QWindow>
 
 // TODO(crueter): Reset samples when user changes turbo, slow, etc.
 PerformanceOverlay::PerformanceOverlay(MainWindow* parent)
@@ -80,6 +78,12 @@ PerformanceOverlay::PerformanceOverlay(MainWindow* parent)
     ui->fps->setFont(font);
     ui->frametime->setFont(font);
 
+    m_dlssLabel = new QLabel(this);
+    m_dlssLabel->setFont(font);
+    m_dlssLabel->setStyleSheet(QStringLiteral("color: white;"));
+    m_dlssLabel->setVisible(false);
+    ui->verticalLayout->insertWidget(0, m_dlssLabel);
+
     // pos/stats
     resetPosition(m_mainWindow->pos());
     connect(parent, &MainWindow::positionChanged, this, &PerformanceOverlay::resetPosition);
@@ -97,6 +101,8 @@ void PerformanceOverlay::resetPosition(const QPoint& _) {
 
 void PerformanceOverlay::updateStats(const Core::PerfStatsResults& results,
                                      const VideoCore::ShaderNotify& shaders) {
+    m_dlssLabel->setText(m_mainWindow->DlssStatusText());
+    m_dlssLabel->setVisible(!m_mainWindow->DlssStatusText().isEmpty());
     auto fps = results.average_game_fps;
     if (!std::isnan(fps)) {
         // don't sample measurements < 3 fps because they are probably outliers or freezes
@@ -190,16 +196,9 @@ void PerformanceOverlay::paintEvent(QPaintEvent* event) {
 }
 
 void PerformanceOverlay::mousePressEvent(QMouseEvent* event) {
-    if (event->button() != Qt::LeftButton) {
-        return;
+    if (event->button() == Qt::LeftButton) {
+        m_drag_start_pos = event->pos();
     }
-    // Wayland ignores move() on top-level windows, so the overlay sat where the compositor put it:
-    // let the compositor drag it instead.
-    if (QGuiApplication::platformName().startsWith(QStringLiteral("wayland")) && windowHandle() &&
-        windowHandle()->startSystemMove()) {
-        return;
-    }
-    m_drag_start_pos = event->pos();
 }
 
 void PerformanceOverlay::mouseMoveEvent(QMouseEvent* event) {

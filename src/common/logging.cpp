@@ -159,6 +159,9 @@ struct Backend {
     virtual void Flush() noexcept = 0;
 };
 
+/// @brief Formatting specifier (to use with printf) of the equivalent fmt::format() expression
+#define CCB_PRINTF_FMT "[%4d.%06d] %s <%s> %s:%u:%s: %s"
+
 /// @brief Instead of using fmt::format() just use the system's formatting capabilities directly
 struct DirectFormatArgs {
     const char *class_name;
@@ -200,13 +203,7 @@ struct ColorConsoleBackend final : public Backend {
             }());
             SetConsoleTextAttribute(console_handle, color);
             auto const df = GetDirectFormatArgs(entry);
-            // One write per line: MinGW's fprintf emits each character separately, and stdout is
-            // unbuffered here, so every character became a WriteFile on the thread that logs.
-            fmt::memory_buffer line;
-            fmt::format_to(fmt::appender(line), "[{:4d}.{:06d}] {} <{}> {}:{}:{}: ", df.time_seconds, df.time_fractional, df.class_name, df.level_name, entry.filename, entry.line_num, entry.function);
-            line.append(entry.message, entry.message + entry.message_len);
-            line.push_back('\n');
-            std::fwrite(line.data(), 1, line.size(), stdout);
+            std::fprintf(stdout, CCB_PRINTF_FMT "\n", df.time_seconds, df.time_fractional, df.class_name, df.level_name, entry.filename, entry.line_num, entry.function, entry.message);
         }
     }
     void Flush() noexcept override {}
@@ -256,8 +253,23 @@ struct FileBackend final : public Backend {
         void(FS::RemoveFile(old_filename));
         void(FS::RenameFile(filename, old_filename));
         file.emplace(filename, FS::FileAccessMode::Write, FS::FileType::TextFile);
+        path = filename;
+        if (!file->IsOpen()) {
+            // Another Fritchii still holds the log (one that never finished closing, e.g. after
+            // an update's restart): without this the session logged nothing and Export Log sent
+            // that process's old log (a v5.3 log in a v5.5 export, 2026-11-09).
+            auto busy = filename;
+            busy.replace_extension();
+            busy += ".busy.txt";
+            file.emplace(busy, FS::FileAccessMode::Write, FS::FileType::TextFile);
+            path = busy;
+            primary_locked = true;
+        }
     }
     ~FileBackend() noexcept override = default;
+
+    std::filesystem::path path;
+    bool primary_locked = false;
 
     void Write(const Entry& entry) noexcept override {
         if (!enabled)
@@ -459,6 +471,21 @@ void Start() {
 void Stop() {
     if (logging_instance)
         logging_instance->ForEachBackend([](Backend& backend) { backend.Flush(); });
+}
+
+std::filesystem::path FilePath(bool* primary_locked) {
+    if (primary_locked) {
+        *primary_locked = false;
+    }
+#ifndef __OPENORBIS__
+    if (logging_instance && logging_instance->file_backend) {
+        if (primary_locked) {
+            *primary_locked = logging_instance->file_backend->primary_locked;
+        }
+        return logging_instance->file_backend->path;
+    }
+#endif
+    return {};
 }
 
 void SetGlobalFilter(const Filter& filter) {

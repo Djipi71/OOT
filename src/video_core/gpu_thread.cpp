@@ -7,14 +7,9 @@
 #include <chrono>
 #include <thread>
 
-#ifdef __linux__
-#include <sys/prctl.h>
-#elif defined(_WIN32)
-#include "common/windows/timer_resolution.h"
-#endif
-
 #include "common/assert.h"
 #include "common/dkb_cpu_trace.h"
+#include "common/nx2_timeline.h"
 #include "common/scope_exit.h"
 #include "common/settings.h"
 #include "common/thread.h"
@@ -58,10 +53,6 @@ void ThreadManager::StartThread(VideoCore::RendererBase& renderer, Core::Fronten
     thread = std::jthread([&](std::stop_token stop_token) {
         const Common::DkbCpuTrace::Registration cpu_trace{Common::DkbCpuTrace::Role::GpuCommand};
         Common::SetCurrentThreadName("GPU");
-#ifdef __linux__
-        // The pending-channel polls below sleep 50 us; the default timer slack adds up to 50 more.
-        prctl(PR_SET_TIMERSLACK, 1UL, 0, 0, 0);
-#endif
         Common::SetCurrentThreadPriority(Common::ThreadPriority::Critical);
         Common::PinCurrentThread(Common::PinnedRole::GpuFront);
         Common::SetCurrentThreadToPerformanceCores();
@@ -80,35 +71,29 @@ void ThreadManager::StartThread(VideoCore::RendererBase& renderer, Core::Fronten
             split.MaybeStart(system);
             if (scheduler.HasPendingChannels()) {
                 // Suspended channels wait on semaphores the CPU releases: poll them meanwhile.
-                bool resumed = false;
                 {
                     Profile::Scope scope{Profile::Zone::ResumePending};
-                    resumed = scheduler.ResumePending(system.GPU());
-                }
-                if (resumed) {
-                    last_progress = std::chrono::steady_clock::now();
+                    scheduler.ResumePending(system.GPU());
                 }
                 if (!state.queue.TryPop(next)) {
-                    if (!scheduler.HasPendingChannels()) {
-                        continue;
+                    // EDEN_NX2_EXP27 & 1: what the resumed channels sent goes to the back before
+                    // this thread yields or sleeps (Commit publishes every 256 words).
+                    if (split.Active()) {
+                        split.PublishBeforeWait();
                     }
                     // The CPU usually releases the semaphore soon after: poll for half a
-                    // millisecond, then in short sleeps. Ocarina of Time waits here ~330 times a
-                    // second and its present waits for the work behind them: with 1 ms sleeps the
-                    // present waited ~17 ms a frame in Kokiri village, with 50 us ~1 ms. A channel
-                    // still waiting after 2 s (menus, loading) goes back to 1 ms sleeps.
+                    // millisecond before sleeping, or every wait also waits out a host sleep
+                    // (title 1 waits ~25 times a second).
+                    // EDEN_NX2_EXP6 (zortos293/Lichii#446): 1 = 50 us sleeps (Ocarina waits here
+                    // ~330 times a second and its present waits for the work behind them; on
+                    // Windows a sleep still lasts one timer tick, ~0.5 ms), 2 = always yield.
                     Profile::Scope scope{Profile::Zone::PendingSleep};
-                    const auto waited = std::chrono::steady_clock::now() - last_progress;
-                    if (waited < std::chrono::microseconds{500}) {
+                    const int poll = VideoCore::Nx2Debug::Experiment(6);
+                    if (poll == 2 || std::chrono::steady_clock::now() - last_progress <
+                                         std::chrono::microseconds{500}) {
                         std::this_thread::yield();
-                    } else if (waited < std::chrono::seconds{2}) {
-#ifdef _WIN32
-                        // sleep_for(50us) rounds up to Sleep(1) (>= 1 ms) on Windows;
-                        // SleepForOneTick uses NtDelayExecution(-1) for one high-res timer tick.
-                        Common::Windows::SleepForOneTick();
-#else
+                    } else if (poll == 1) {
                         std::this_thread::sleep_for(std::chrono::microseconds{50});
-#endif
                     } else {
                         std::this_thread::sleep_for(std::chrono::milliseconds{1});
                     }
@@ -121,13 +106,32 @@ void ThreadManager::StartThread(VideoCore::RendererBase& renderer, Core::Fronten
             if (stop_token.stop_requested()) {
                 break;
             }
+            last_progress = std::chrono::steady_clock::now();
             if (split.Active()) {
                 // Only command lists are parsed here; everything else runs on the back thread
                 // in order, and so does the signal that the command ran.
                 auto* const rasterizer_ptr = renderer.ReadRasterizer();
                 if (auto* submit_list = std::get_if<SubmitListCommand>(&next.data)) {
-                    Profile::Scope scope{Profile::Zone::Push};
-                    scheduler.Push(system.GPU(), submit_list->channel, std::move(submit_list->entries));
+                    const bool timeline = Common::Nx2Timeline::Active();
+                    if (timeline) {
+                        // The list's sequence number (PushCommand's "submit list") on each
+                        // stage: here, and from a one-entry marker where the back reaches it.
+                        Common::Nx2Timeline::Instant("front: list begin", {"seq", next.fence},
+                                                     {"channel", submit_list->channel});
+                        split.Defer(
+                            [seq = next.fence] {
+                                Common::Nx2Timeline::Instant("back: list", {"seq", seq});
+                            },
+                            VideoCommon::GpuSplit::Effect::None);
+                    }
+                    {
+                        Profile::Scope scope{Profile::Zone::Push};
+                        scheduler.Push(system.GPU(), submit_list->channel,
+                                       std::move(submit_list->entries));
+                    }
+                    if (timeline) {
+                        Common::Nx2Timeline::Instant("front: list end", {"seq", next.fence});
+                    }
                 } else if (std::holds_alternative<GPUTickCommand>(next.data)) {
                     split.Defer([gpu = &system.GPU()] { gpu->TickWork(); });
                 } else if (auto* run = std::get_if<RunCommand>(&next.data)) {
@@ -156,12 +160,22 @@ void ThreadManager::StartThread(VideoCore::RendererBase& renderer, Core::Fronten
                     },
                     VideoCommon::GpuSplit::Effect::None);
                 split.Publish();
-                last_progress = std::chrono::steady_clock::now();
                 continue;
             }
             if (auto* submit_list = std::get_if<SubmitListCommand>(&next.data)) {
-                Profile::Scope scope{Profile::Zone::Push};
-                scheduler.Push(system.GPU(), submit_list->channel, std::move(submit_list->entries));
+                const bool timeline = Common::Nx2Timeline::Active();
+                if (timeline) {
+                    Common::Nx2Timeline::Instant("front: list begin", {"seq", next.fence},
+                                                 {"channel", submit_list->channel});
+                }
+                {
+                    Profile::Scope scope{Profile::Zone::Push};
+                    scheduler.Push(system.GPU(), submit_list->channel,
+                                   std::move(submit_list->entries));
+                }
+                if (timeline) {
+                    Common::Nx2Timeline::Instant("front: list end", {"seq", next.fence});
+                }
             } else if (std::holds_alternative<GPUTickCommand>(next.data)) {
                 Profile::Scope scope{Profile::Zone::Tick};
                 system.GPU().TickWork();
@@ -178,7 +192,6 @@ void ThreadManager::StartThread(VideoCore::RendererBase& renderer, Core::Fronten
                 ASSERT(false);
             }
             SignalCommand(state, next.fence, next.block);
-            last_progress = std::chrono::steady_clock::now();
         }
     });
 }
@@ -228,9 +241,22 @@ u64 ThreadManager::PushCommand(CommandData&& command_data, bool block, bool is_a
 
     std::unique_lock lk(state.write_lock);
     const u64 fence{++state.last_fence};
+    if (Common::Nx2Timeline::Active()) {
+        // The command's sequence number, which the GPU threads' list markers repeat
+        // (tools/nx2/critical_path.py follows a list through the stages with it). This is also
+        // what wakes the front from "idle".
+        if (const auto* list = std::get_if<SubmitListCommand>(&command_data)) {
+            Common::Nx2Timeline::Instant("submit list", {"seq", fence}, {"channel", list->channel},
+                                         {"entries", list->entries.command_lists.size()});
+        } else {
+            Common::Nx2Timeline::Instant("submit command", {"seq", fence});
+        }
+    }
     state.queue.EmplaceWait(std::move(command_data), fence, block);
 
     if (block) {
+        // With the split, SignalCommand runs on the back.
+        Common::Nx2Timeline::ArgSpan timeline_span{"guest: wait for GPU command", {"seq", fence}};
         state.cv.wait(lk, thread.get_stop_token(), [this, fence] {
             return fence <= state.signaled_fence.load(std::memory_order_relaxed);
         });

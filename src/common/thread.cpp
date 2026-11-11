@@ -22,6 +22,7 @@
 #include "common/nx2_sample_profile.h"
 #include "common/assert.h"
 #include "common/thread.h"
+#include "common/nx2_hitch.h"
 #include "common/thread_pinning.h"
 #ifdef __APPLE__
 #include <mach/mach.h>
@@ -515,18 +516,7 @@ const WindowsCpuSets& CpuSets() {
             (entry.efficiency_class == best ? result.performance : result.efficiency)
                 .push_back(entry.id);
         }
-        // About ten time-critical threads (six guest cores, GPU front and back, Vulkan worker,
-        // timing, fencing) crowd fewer performance processors: an i5-1235U (2 P cores, 4 logical)
-        // ran Ocarina of Time at 9.3 FPS with them kept there, 11.5 FPS with the placement off.
-        constexpr size_t MinPerformanceProcessors = 8;
-        const bool few_performance = result.performance.size() < MinPerformanceProcessors;
-        result.hybrid = !result.efficiency.empty() && !few_performance;
-        if (!result.efficiency.empty() && few_performance) {
-            LOG_INFO(Common,
-                     "Hybrid CPU with {} performance logical processors (fewer than {}): "
-                     "threads are left to Windows",
-                     result.performance.size(), MinPerformanceProcessors);
-        }
+        result.hybrid = !result.efficiency.empty() && result.performance.size() >= 2;
         if (result.hybrid) {
             LOG_INFO(Common,
                      "Hybrid CPU: {} performance and {} efficiency logical processors, "
@@ -679,6 +669,7 @@ void SetCurrentThreadPriority(ThreadPriority new_priority) {
 
 void SetCurrentThreadName(const char* name) {
     Nx2SampleProfile::OnThreadNamed(name);
+    Nx2Hitch::RegisterThread(name);
 #ifdef _MSC_VER
     // Sets the debugger-visible name of the current thread.
     if (auto pf = (decltype(&SetThreadDescription))(void*)GetProcAddress(GetModuleHandle(TEXT("KernelBase.dll")), "SetThreadDescription"); pf)

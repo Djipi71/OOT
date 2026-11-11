@@ -11,7 +11,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
-#include <source_location>
+#include <shared_mutex>
 #include <vector>
 #include <boost/container/small_vector.hpp>
 
@@ -118,8 +118,7 @@ public:
      * in the Host Memory counterpart. Note: This functions cause Host GPU Memory
      * Flushes and Invalidations, respectively to each operation.
      */
-    void ReadBlock(GPUVAddr gpu_src_addr, void* dest_buffer, std::size_t size, VideoCommon::CacheType which = VideoCommon::CacheType::All,
-                   std::source_location caller = std::source_location::current()) const;
+    void ReadBlock(GPUVAddr gpu_src_addr, void* dest_buffer, std::size_t size, VideoCommon::CacheType which = VideoCommon::CacheType::All) const;
     void WriteBlock(GPUVAddr gpu_dest_addr, const void* src_buffer, std::size_t size, VideoCommon::CacheType which = VideoCommon::CacheType::All);
     void CopyBlock(GPUVAddr gpu_dest_addr, GPUVAddr gpu_src_addr, std::size_t size, VideoCommon::CacheType which = VideoCommon::CacheType::All);
 
@@ -133,14 +132,23 @@ public:
      * WriteBlockUnsafe instead of WriteBlock since it shouldn't invalidate the texture
      * being flushed.
      */
-    void ReadBlockUnsafe(GPUVAddr gpu_src_addr, void* dest_buffer, std::size_t size,
-                         std::source_location caller = std::source_location::current()) const;
+    void ReadBlockUnsafe(GPUVAddr gpu_src_addr, void* dest_buffer, std::size_t size) const;
     void WriteBlockUnsafe(GPUVAddr gpu_dest_addr, const void* src_buffer, std::size_t size);
+
+    /// ReadBlockUnsafe for a thread that is not the GPU thread (EDEN_NX2_ASYNC_TRANSLATE: the
+    /// translation workers' texture descriptor reads). Holds the page table lock shared, so Map,
+    /// MapSparse and Unmap can't change the tables under the copy. Gives up (false, nothing read)
+    /// when a writer keeps the lock for 2 ms: a writer can wait on the GPU thread (the caches'
+    /// unmap callbacks), so a worker never waits on one without a limit.
+    [[nodiscard]] bool ReadBlockGuarded(GPUVAddr gpu_src_addr, void* dest_buffer,
+                                        std::size_t size) const;
+    /// IsFullyMappedRange under the same lock, with the same limit (nullopt when it gave up).
+    [[nodiscard]] std::optional<bool> IsFullyMappedRangeGuarded(GPUVAddr gpu_addr,
+                                                                std::size_t size) const;
 
     /// Reads `count` consecutive words as Read<u32> would (Switch 2 syncpoint shim included),
     /// without a translation per word.
-    void ReadWordsUnsafe(GPUVAddr gpu_src_addr, u32* dest, std::size_t count,
-                         std::source_location caller = std::source_location::current()) const;
+    void ReadWordsUnsafe(GPUVAddr gpu_src_addr, u32* dest, std::size_t count) const;
     void WriteBlockCached(GPUVAddr gpu_dest_addr, const void* src_buffer, std::size_t size);
     /// WriteBlockCached of `count` consecutive words within one device page, in a single write.
     void WriteWordsCached(GPUVAddr gpu_dest_addr, const u32* words, std::size_t count);
@@ -233,8 +241,7 @@ private:
     void UpdateContinuousRuns(GPUVAddr gpu_addr, size_t size);
     const MappingSnapshot& CurrentSnapshot() const;
 
-    void ReadBlockImpl(GPUVAddr gpu_src_addr, void* dest_buffer, std::size_t size, VideoCommon::CacheType which, bool unsafe,
-                       std::source_location caller) const;
+    void ReadBlockImpl(GPUVAddr gpu_src_addr, void* dest_buffer, std::size_t size, VideoCommon::CacheType which, bool unsafe) const;
     void WriteBlockImpl(GPUVAddr gpu_dest_addr, const void* src_buffer, std::size_t size, VideoCommon::CacheType which, bool unsafe);
 
     [[nodiscard]] std::size_t PageEntryIndex(GPUVAddr gpu_addr, bool is_big_page) const {
@@ -301,6 +308,12 @@ private:
 
     bool native_tiling{};
     mutable std::mutex guard;
+    /// Taken exclusively by Map, MapSparse and Unmap around their page table updates while
+    /// translation workers read guest memory (VideoCommon::AsyncTranslateWorkers), shared by the
+    /// guarded reads. Untouched otherwise.
+    mutable std::shared_mutex page_table_lock;
+    /// Shared lock of page_table_lock, waiting 2 ms at most.
+    [[nodiscard]] bool TryLockPageTableShared() const;
     /// Bumped after each page table change; readers keep their MappingSnapshot until then.
     std::atomic<u64> map_serial{};
 

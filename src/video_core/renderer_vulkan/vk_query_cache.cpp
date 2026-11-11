@@ -4,8 +4,8 @@
 // SPDX-FileCopyrightText: Copyright 2023 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <chrono>
 #include <cstddef>
-#include <cstdlib>
 #include <limits>
 #include <map>
 #include <memory>
@@ -64,8 +64,12 @@ public:
         ASSERT(references == 0);
         VideoCommon::BankBase::Reset();
         if (device.IsHostQueryResetSupported()) {
-            const auto& dev = device.GetLogical();
-            dev.ResetQueryPool(*query_pool, 0, BANK_SIZE);
+            // On the Vulkan worker, ahead of the BeginQuery commands recorded after it: a host
+            // reset costs the recording thread ~100 us a bank on AMD's driver. The bank is dead
+            // (no query uses it and the GPU is done with it), so nothing else touches the pool.
+            scheduler.Record([dev = &device.GetLogical(), pool = *query_pool](vk::CommandBuffer) {
+                dev->ResetQueryPool(pool, 0, BANK_SIZE);
+            });
         } else {
             scheduler.RequestOutsideRenderPassOperationContext();
             scheduler.Record([pool = *query_pool](vk::CommandBuffer cmdbuf) {
@@ -218,25 +222,24 @@ public:
         PauseCounter();
         // A title that counts without resetting or reporting grows the query by a slot at every
         // submission and render pass, and the query keeps every bank it touches alive. Ocarina of
-        // Time's title screen and file select reached 16,384 slots over 64 banks, while gameplay
-        // windows in Hyrule Field, Kakariko Village, and the Shooting Gallery reach up to 346
-        // slots across two banks. Past 4 banks (1,024 slots), drop the count as a reset would.
-        // EDEN_DJIPI_QUERY_SLOTS overrides the bound; 0 never drops a count.
-        static const size_t MaxRunningQuerySlots = [] {
-            const char* value = std::getenv("EDEN_DJIPI_QUERY_SLOTS");
-            return value ? static_cast<size_t>(std::strtoull(value, nullptr, 10))
-                         : size_t{4 * SamplesQueryBank::BANK_SIZE};
-        }();
-        if (current_query && MaxRunningQuerySlots != 0 &&
-            current_query->size_slots > MaxRunningQuerySlots) {
-            // It drops a real count. Logged on the 1st, 2nd, 4th, 8th... drop, so a window this
-            // long during gameplay doesn't go unnoticed and a title screen doesn't flood the log.
-            ++bank_bound_resets;
-            if ((bank_bound_resets & (bank_bound_resets - 1)) == 0) {
-                LOG_WARNING(Render_Vulkan,
-                            "Samples query ran {} slots with no reset or report, dropped its "
-                            "count (drop {})",
-                            current_query->size_slots, bank_bound_resets);
+        // Time's title screen and file select reached 16,384 slots over 64 banks (its gameplay
+        // windows span at most 36 slots). Past a bank, drop the count as a reset would.
+        // EDEN_NX2_EXP16=<slots> raises the limit (zortos293/Lichii#558/#570 for Ocarina's
+        // flickering water and windows; 16,384 hung AMD with the split GPU thread). Resets are
+        // logged every 5 s while they happen.
+        const int limit_setting = VideoCore::Nx2Debug::Experiment(16);
+        const size_t limit =
+            limit_setting > 0 ? static_cast<size_t>(limit_setting) : SamplesQueryBank::BANK_SIZE;
+        if (current_query && current_query->size_slots > limit) {
+            static u64 resets{};
+            static auto since = std::chrono::steady_clock::now();
+            ++resets;
+            if (const auto now = std::chrono::steady_clock::now();
+                now - since >= std::chrono::seconds{5}) {
+                LOG_INFO(Render_Vulkan, "Occlusion counter resets past {} slots: {} in {:.1f} s", limit,
+                         resets, std::chrono::duration<double>(now - since).count());
+                resets = 0;
+                since = now;
             }
             ResetCounter();
         }
@@ -676,7 +679,6 @@ private:
     bool accumulation_since_last_sync{};
     VideoCommon::HostQueryBase* current_query;
     bool has_started{};
-    u64 bank_bound_resets{}; ///< Counts CloseCounter dropped once a query outgrew the bank bound.
     std::mutex flush_guard;
     std::optional<QueriesPrefixScanPass> queries_prefix_scan_pass;
 };
@@ -1766,6 +1768,11 @@ void QueryCacheRuntime::SyncValues(std::span<SyncValuesType> values, VkBuffer ba
             impl->buffers_to_upload_to.emplace_back(buffer->Handle(), offset);
         }
     });
+    // EDEN_NX2_EXP49: the copies below are GPU writes the buffer cache doesn't record. Read
+    // downloads taken before them must not keep the bytes they downloaded as the newest.
+    for (const auto& value : values) {
+        impl->buffer_cache.OutdateReadDownloads(value.address, value.size);
+    }
 
     VkBuffer src_buffer;
     [[maybe_unused]] StagingBufferRef ref;

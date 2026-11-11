@@ -63,6 +63,8 @@ add_library(core STATIC
     file_sys/content_archive.h
     file_sys/control_metadata.cpp
     file_sys/control_metadata.h
+    file_sys/decrypted_nca.cpp
+    file_sys/decrypted_nca.h
     file_sys/errors.h
     file_sys/fs_directory.h
     file_sys/fs_file.h
@@ -138,6 +140,8 @@ add_library(core STATIC
     file_sys/registered_cache.h
     file_sys/nup_container.cpp
     file_sys/nup_container.h
+    file_sys/nx2_shader_extract.cpp
+    file_sys/nx2_shader_extract.h
     file_sys/nup_writer.cpp
     file_sys/nup_writer.h
     file_sys/romfs.cpp
@@ -377,6 +381,8 @@ add_library(core STATIC
     hle/kernel/svc/svc_light_ipc.cpp
     hle/kernel/svc/svc_lock.cpp
     hle/kernel/svc/svc_memory.cpp
+    hle/kernel/svc/svc_nx2_oot_poll.cpp
+    hle/kernel/svc/svc_nx2_oot_present.cpp
     hle/kernel/svc/svc_physical_memory.cpp
     hle/kernel/svc/svc_port.cpp
     hle/kernel/svc/svc_power_management.cpp
@@ -839,8 +845,6 @@ add_library(core STATIC
     hle/service/ns/ns.h
     hle/service/ns/ns_results.h
     hle/service/ns/ns_types.h
-    hle/service/ns/font_merge.cpp
-    hle/service/ns/font_merge.h
     hle/service/ns/platform_service_manager.cpp
     hle/service/ns/platform_service_manager.h
     hle/service/ns/query_service.cpp
@@ -1056,7 +1060,6 @@ add_library(core STATIC
     hle/service/nx2_streamplay.h
     hle/service/nx2_stub_interface.h
     hle/service/nx2_gsv.h
-    hle/service/nx2_movie_clock.h
     hle/service/nx2_video_input_queue.h
     hle/service/nx2_image_layout.h
     hle/service/nx2_present_pacer.h
@@ -1179,6 +1182,8 @@ add_library(core STATIC
     loader/nsp.h
     loader/nup.cpp
     loader/nup.h
+    loader/nx.cpp
+    loader/nx.h
     loader/xci.cpp
     loader/xci.h
     memory.cpp
@@ -1254,7 +1259,7 @@ target_link_libraries(core PRIVATE
     RenderDoc::API
     ZLIB::ZLIB)
 
-target_link_libraries(core PUBLIC httplib::httplib zstd::zstd)
+target_link_libraries(core PUBLIC httplib::httplib zstd::zstd nxformat_reader)
 
 if (ENABLE_WEB_SERVICE)
     target_compile_definitions(core PUBLIC ENABLE_WEB_SERVICE)

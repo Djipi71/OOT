@@ -45,8 +45,13 @@ add_library(
     div_ceil.h
     dkb_cpu_trace.cpp
     dkb_cpu_trace.h
+    jit_symbols.cpp
+    jit_symbols.h
+    nx2_hitch.cpp
+    nx2_hitch.h
     nx2_sampler.cpp
     nx2_sampler.h
+    nx2_gpu_write_listener.h
     dynamic_library.cpp
     dynamic_library.h
     elf.h
@@ -57,6 +62,8 @@ add_library(
     fiber.h
     fixed_point.h
     free_region_manager.h
+    frizti_settings.cpp
+    frizti_settings.h
     fs/file.cpp
     fs/file.h
     fs/fs.cpp
@@ -65,8 +72,12 @@ add_library(
     fs/fs_types.h
     fs/fs_util.cpp
     fs/fs_util.h
+    fs/file_lock.cpp
+    fs/file_lock.h
     fs/path_util.cpp
     fs/path_util.h
+    fs/profile_migration.cpp
+    fs/profile_migration.h
     hash.h
     heap_tracker.cpp
     heap_tracker.h
@@ -164,12 +175,9 @@ add_library(
     net/net.h net/net.cpp
     container/unordered_map.h container/unordered_set.h)
 
-# The ZBIC decoder runs once per module at load, so a profile buys it nothing, and the aarch64
-# PGO build returns errors for NSOs the plain build decodes (#95). -fno-profile-instr-use is the
-# spelling both clang and clang-cl accept; it overrides -fprofile-use from CMAKE_CXX_FLAGS.
 set_source_files_properties(zbic_compression.cpp PROPERTIES
     INCLUDE_DIRECTORIES "${ZBIC_INCLUDE_DIR}"
-    COMPILE_OPTIONS "$<$<CXX_COMPILER_ID:AppleClang,Clang,GNU>:-Wno-unused-function;-Wno-missing-declarations;-Wno-shadow>;$<$<CXX_COMPILER_ID:MSVC>:/wd4505;/wd5245>;$<$<CXX_COMPILER_ID:AppleClang,Clang>:-fno-profile-instr-use>")
+    COMPILE_OPTIONS "$<$<CXX_COMPILER_ID:AppleClang,Clang,GNU>:-Wno-unused-function;-Wno-missing-declarations;-Wno-shadow>;$<$<CXX_COMPILER_ID:MSVC>:/wd4505;/wd5245>")
 
 if(WIN32)
     target_sources(common PRIVATE windows/timer_resolution.cpp

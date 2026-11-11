@@ -49,6 +49,7 @@
 #include "core/hle/service/filesystem/filesystem.h"
 #include "core/loader/loader.h"
 #include "frontend_common/config.h"
+#include "frontend_common/profile_import.h"
 #include "input_common/drivers/keyboard.h"
 #include "input_common/main.h"
 #include "network/network.h"
@@ -479,12 +480,14 @@ static bool EditNup(const Core::LaunchParams& lp) {
     }
 }
 
-/// Hidden test hook (not in --help): builds a game's shader precache file without booting it.
-///   yuzu-cmd --build-warm <game file> <title id hex> <output dir>
+/// Hidden test hook (not in --help): builds a game's shader warm-up files without booting it.
+///   yuzu-cmd --build-warm <game file> <title id hex> <output dir> [--defaults | cache ...]
+/// With pipeline cache files, the draw state guesses come from them; --defaults uses the
+/// built-in guesses; neither uses the title's own pipeline cache when it exists.
 static bool BuildWarm(Core::System& system, int argc, char** argv) {
     namespace ShaderWarm = VideoCommon::ShaderWarm;
     if (argc < 5) {
-        fmt::print(stderr, "usage: --build-warm <game> <title id> <output dir>\n");
+        fmt::print(stderr, "usage: --build-warm <game> <title id> <output dir> [--defaults | cache ...]\n");
         return false;
     }
     system.SetContentProvider(std::make_unique<FileSys::ContentProviderUnion>());
@@ -492,6 +495,18 @@ static bool BuildWarm(Core::System& system, int argc, char** argv) {
     const u64 title_id = std::strtoull(argv[3], nullptr, 16);
     ShaderWarm::BuildOptions options;
     options.output_dir = Common::FS::ToU8String(argv[4]);
+    std::vector<std::filesystem::path> caches;
+    bool defaults = false;
+    for (int i = 5; i < argc; ++i) {
+        if (std::string_view{argv[i]} == "--defaults") {
+            defaults = true;
+        } else {
+            caches.emplace_back(Common::FS::ToU8String(argv[i]));
+        }
+    }
+    if (defaults || !caches.empty()) {
+        options.runtime_caches = caches;
+    }
     std::string last_stage;
     auto last_print = std::chrono::steady_clock::now();
     const auto begin = last_print;
@@ -537,9 +552,10 @@ static bool BuildWarm(Core::System& system, int argc, char** argv) {
             break;
         }
     }
-    fmt::print("{{\"ok\": {}, \"error\": \"{}\", \"archives\": {}, \"compute\": {}, "
-               "\"skipped\": {}, \"seconds\": {:.1f}}}\n",
-               result.ok, error, result.archives, result.compute_programs, result.skipped,
+    fmt::print("{{\"ok\": {}, \"error\": \"{}\", \"compute\": {}, \"vertex\": {}, "
+               "\"fragment\": {}, \"skipped\": {}, \"seconds\": {:.1f}}}\n",
+               result.ok, error, result.compute_programs, result.vertex_programs,
+               result.fragment_programs, result.skipped,
                std::chrono::duration<double>(std::chrono::steady_clock::now() - begin).count());
     std::fflush(stdout);
     return result.ok;
@@ -552,8 +568,6 @@ extern "C" SDL_AppResult SDL_AppInit(void **appstate, int argc, char **argv) {
     // SDL calls SDL_AppIterate back to back by default, which kept a host core at 100% polling
     // input; 240 Hz is plenty for input and the key script.
     SDL_SetHint(SDL_HINT_MAIN_CALLBACK_RATE, "240");
-    SdlState* state = new SdlState();
-    *appstate = state;
 
 #ifdef _WIN32
     if (AttachConsole(ATTACH_PARENT_PROCESS)) {
@@ -570,6 +584,16 @@ extern "C" SDL_AppResult SDL_AppInit(void **appstate, int argc, char **argv) {
         setrlimit(RLIMIT_NOFILE, &rl);
     }
 #endif
+
+    try {
+        FrontendCommon::CheckLegacyProfileBeforeConfig();
+    } catch (const std::exception& exception) {
+        fmt::print(stderr, "{}\n", exception.what());
+        return SDL_APP_FAILURE;
+    }
+
+    SdlState* state = new SdlState();
+    *appstate = state;
 
     Common::Log::Initialize();
     Common::Log::SetColorConsoleBackendEnabled(true);
@@ -658,6 +682,10 @@ extern "C" SDL_AppResult SDL_AppInit(void **appstate, int argc, char **argv) {
 #endif
 
     state->system.SetContentProvider(std::make_unique<FileSys::ContentProviderUnion>());
+    // Holds the updates and DLC an NX archive brings, as the Qt frontend does.
+    static FileSys::ManualContentProvider manual_provider;
+    state->system.RegisterContentProvider(FileSys::ContentProviderUnionSlot::FrontendManual,
+                                          &manual_provider);
     state->system.SetFilesystem(std::make_shared<FileSys::RealVfsFilesystem>());
     state->system.GetFileSystemController().CreateFactories(*state->system.GetFilesystem());
     state->system.GetUserChannel().clear();
@@ -693,11 +721,6 @@ extern "C" SDL_AppResult SDL_AppInit(void **appstate, int argc, char **argv) {
         break; // Expected case
     case Core::SystemResultStatus::ErrorGetLoader:
         LOG_CRITICAL(Frontend, "Failed to obtain loader for {}!", lp.filepath);
-        return SDL_APP_FAILURE;
-    case Core::SystemResultStatus::ErrorMemoryAllocation:
-        LOG_CRITICAL(Frontend,
-                     "Not enough host memory to start the game. Close other applications and "
-                     "check available memory and paging-file space, then try again.");
         return SDL_APP_FAILURE;
     case Core::SystemResultStatus::ErrorLoader:
         LOG_CRITICAL(Frontend, "Failed to load ROM!");

@@ -11,13 +11,16 @@
 #include <atomic>
 #include <chrono>
 #include <functional>
+#include <memory>
 #include <optional>
+#include <string>
 #include <span>
 #include <type_traits>
 #include <vector>
 
 #include "common/thread_worker.h"
 #include "shader_recompiler/shader_info.h"
+#include "video_core/evicted_pointer_slots.h"
 #include "video_core/engines/maxwell_3d.h"
 #include "video_core/renderer_vulkan/fixed_pipeline_state.h"
 #include "video_core/renderer_vulkan/pipeline_build.h"
@@ -25,6 +28,7 @@
 #include "video_core/renderer_vulkan/vk_buffer_cache.h"
 #include "video_core/renderer_vulkan/vk_descriptor_buffer.h"
 #include "video_core/renderer_vulkan/vk_descriptor_pool.h"
+#include "video_core/renderer_vulkan/vk_pipeline_library.h"
 #include "video_core/renderer_vulkan/vk_texture_cache.h"
 #include "video_core/renderer_vulkan/vk_update_descriptor.h"
 #include "video_core/vulkan_common/vulkan_wrapper.h"
@@ -75,6 +79,14 @@ class RescalingPushConstant;
 class RenderAreaPushConstant;
 class Scheduler;
 
+/// Graphics pipeline libraries (EDEN_NX2_GPL): non-null `library_cache` builds the pipeline
+/// from shared per-stage libraries; `libraries_only` builds only the libraries (warm-up).
+struct GraphicsPipelineLibraryParams {
+    GraphicsPipelineLibraryCache* library_cache{};
+    std::array<u128, Tegra::Engines::Maxwell3D::Regs::MaxShaderStage> spirv_hashes{};
+    bool libraries_only{};
+};
+
 /// Mesh emulation on a device without VK_EXT_mesh_shader: the mesh program (stage 0) is built as
 /// a compute shader that writes its output to a storage buffer, and this vertex shader draws it
 /// (see Shader::Backend::SPIRV::EmitMeshEmulationVertex).
@@ -102,6 +114,18 @@ class GraphicsPipeline {
     static constexpr size_t NUM_STAGES = Tegra::Engines::Maxwell3D::Regs::MaxShaderStage;
 
 public:
+    /// Emits the stages' SPIR-V on a worker; with libraries it also returns each stage's SPIR-V
+    /// hash (zero for absent stages).
+    using EmitStagesFunc = std::function<std::array<vk::ShaderModule, NUM_STAGES>(
+        std::array<u128, NUM_STAGES>& spirv_hashes)>;
+
+    /// Graphics pipeline libraries (EDEN_NX2_GPL): non-null `library_cache` builds the pipeline
+    /// from per-stage libraries; the stages were emitted with one descriptor set per stage.
+    /// `libraries_only` builds the shader libraries and nothing else (warm-up, no draw).
+    // Declared outside the class: GCC rejects a default argument `= {}` of a nested struct
+    // with member initializers inside its enclosing class.
+    using LibraryParams = GraphicsPipelineLibraryParams;
+
     explicit GraphicsPipeline(
         Scheduler& scheduler, BufferCache& buffer_cache, TextureCache& texture_cache,
         vk::PipelineCache& pipeline_cache, VideoCore::ShaderNotify* shader_notify,
@@ -111,10 +135,13 @@ public:
         PipelineStatistics* pipeline_statistics, RenderPassCache& render_pass_cache,
         const GraphicsPipelineCacheKey& key, std::array<vk::ShaderModule, NUM_STAGES> stages,
         const std::array<const Shader::Info*, NUM_STAGES>& infos,
-        std::function<std::array<vk::ShaderModule, NUM_STAGES>()> emit_stages = {},
+        EmitStagesFunc emit_stages = {}, LibraryParams library_params = {},
         std::optional<MeshEmulationSetup> mesh_emulation = std::nullopt);
 
     static std::chrono::nanoseconds TakeHoldTime() noexcept;
+    /// Draws held for unbuilt pipelines this session (never reset; the worst frame line takes
+    /// differences of it).
+    static std::chrono::nanoseconds HoldTimeTotal() noexcept;
 
     bool HasDynamicVertexInput() const noexcept { return key.state.dynamic_vertex_input; }
     const std::array<u64, 6>& ShaderHashes() const noexcept {
@@ -258,6 +285,15 @@ public:
         return used;
     }
 
+    /// The constant buffer slots each program binds as storage buffer pointers
+    [[nodiscard]] const VideoCommon::EvictedPointerSlots::Slots& MappedPointers() const noexcept {
+        return mapped_pointers;
+    }
+
+    void SetMappedPointers(VideoCommon::EvictedPointerSlots::Slots slots) noexcept {
+        mapped_pointers = std::move(slots);
+    }
+
     /// Forgets the transitions, which may point to pipelines the cache evicted.
     void ClearTransitions() noexcept {
         transition_keys.clear();
@@ -266,6 +302,10 @@ public:
 
     [[nodiscard]] bool IsBuilt() const noexcept {
         return build->IsBuilt();
+    }
+
+    [[nodiscard]] bool Failed() const noexcept {
+        return build->Failed();
     }
 
     template <typename Spec>
@@ -279,13 +319,76 @@ public:
     }
 
 private:
+    /// EDEN_NX2_EXP32 (texture binding memo; zortos293/Lichii#717's BINDMEMO reduced to "the same
+    /// textures as this pipeline's previous draw"): that draw's texture bindings as resolved and
+    /// pushed, for pipelines whose image bindings are all sampled textures (no texture or image
+    /// buffers, no storage images). A draw reading the same handles with the same texture cache
+    /// state (TextureCache::TextureMemoState), the same guest TIC/TSC entries and clean images
+    /// takes the view and sampler ids and the descriptor entries from it instead of resolving them
+    /// (GetSamplerId, FillImageViews) and building them (PushImageDescriptors).
+    struct TextureMemo {
+        bool valid{};
+        u64 generation{};  ///< the switch generation it was recorded in (a switch change drops it)
+        u64 touch_frame{}; ///< the frame its images were last touched in the LRU
+        TextureCache::TextureMemoState state{};
+        std::vector<u32> handles;         ///< per texture: the TIC handle read
+        std::vector<u32> sampler_handles; ///< per texture: the TSC handle read
+        std::vector<TextureCache::TextureMemoEntry> entries;
+        std::vector<VideoCommon::ImageViewId> views;
+        std::vector<VideoCommon::SamplerId> samplers;
+        std::vector<DescriptorUpdateEntry> descriptors; ///< per texture, in push order
+        std::vector<u8> rescaled; ///< per texture descriptor (array), in push order
+    };
+
+    /// Whether the memo holds this draw's textures (counts why not).
+    [[nodiscard]] bool TextureMemoHit(const TextureCache::TextureMemoState& state,
+                                      std::span<const VideoCommon::ImageViewInOut> views,
+                                      std::span<const u32> sampler_handles);
+
+    /// Remembers the textures this draw resolved and pushed, when nothing in the texture cache
+    /// changed since `state` was taken and the tables still hold them as resolved.
+    void RecordTextureMemo(const TextureCache::TextureMemoState& state,
+                           std::span<const VideoCommon::ImageViewInOut> views,
+                           std::span<const u32> sampler_handles,
+                           std::span<const VideoCommon::SamplerId> samplers,
+                           std::span<const DescriptorUpdateEntry> descriptors,
+                           std::span<const u8> rescaled);
+
+    /// EXP32 verify: a memo hit resolved and pushed the full way; compares the memo with it,
+    /// logs and counts a difference, and turns the memo off when the switch asks (bit 4).
+    bool VerifyTextureMemo(std::span<const VideoCommon::ImageViewInOut> views,
+                           std::span<const VideoCommon::SamplerId> samplers,
+                           std::span<const DescriptorUpdateEntry> descriptors,
+                           std::span<const u8> rescaled, int switch_value);
+
     template <typename Spec>
     bool ConfigureImpl(bool is_indexed);
 
     bool ConfigureDraw(const RescalingPushConstant& rescaling,
                        const RenderAreaPushConstant& render_are);
 
+    struct PipelineStates;
+
+    /// The fixed-function state of the pipeline (shared by the monolithic and library builds).
+    void FillStates(PipelineStates& states) const;
+
     void MakePipeline(VkRenderPass render_pass);
+
+    /// Library build (EDEN_NX2_GPL): gets or builds the two shader libraries, then (unless
+    /// libraries_only) links them with this pipeline's vertex input and fragment output parts.
+    /// False when a library failed; the caller then builds the pipeline the monolithic way.
+    bool MakeLibraryPipeline(VkRenderPass render_pass);
+
+    GplLibrary MakeShaderLibrary(GplPart part, const PipelineStates& states,
+                                 VkRenderPass render_pass) const;
+
+    std::string ShaderLibraryKey(GplPart part, const PipelineStates& states,
+                                 VkRenderPass render_pass) const;
+
+    vk::Pipeline LinkLibraries(VkRenderPass render_pass, bool optimized);
+
+    /// The library route failed: per-stage sets kept, with a layout a monolithic pipeline takes.
+    void FallBackToMonolithic(VkRenderPass render_pass);
 
     void Validate();
 
@@ -304,6 +407,7 @@ private:
 
     std::vector<GraphicsPipelineCacheKey> transition_keys;
     std::vector<GraphicsPipeline*> transitions;
+    VideoCommon::EvictedPointerSlots::Slots mapped_pointers;
     u64 last_use_frame{};
     bool used{};
 
@@ -320,6 +424,25 @@ private:
     u32 zero_texture_handles{};
     u32 color_output_mask{};
     bool writes_storage{};
+    TextureMemo texture_memo;
+
+    /// Graphics pipeline libraries (EDEN_NX2_GPL): one descriptor set per stage (set index =
+    /// stage index), the shader libraries, and this pipeline's own vertex input and fragment
+    /// output libraries.
+    GraphicsPipelineLibraryCache* const library_cache;
+    const bool libraries_only;
+    std::array<u128, NUM_STAGES> spirv_hashes{};
+    std::array<vk::DescriptorSetLayout, NUM_STAGES> stage_set_layouts;
+    std::array<std::string, NUM_STAGES> stage_set_signatures;
+    std::array<DescriptorAllocator, NUM_STAGES> stage_allocators;
+    std::array<vk::DescriptorUpdateTemplate, NUM_STAGES> stage_templates;
+    std::array<size_t, NUM_STAGES> stage_descriptor_offsets{}; ///< Bytes into the update data
+    bool has_stage_sets{};
+    std::array<std::shared_ptr<const GplLibrary>, 2> shader_libraries;
+    vk::Pipeline vertex_input_library;
+    vk::Pipeline fragment_output_library;
+    vk::DescriptorSetLayout fallback_empty_set_layout;
+    bool linked{};
 
     vk::DescriptorSetLayout descriptor_set_layout;
     DescriptorAllocator descriptor_allocator;

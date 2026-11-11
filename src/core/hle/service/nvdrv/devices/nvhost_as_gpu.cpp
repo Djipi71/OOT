@@ -6,16 +6,19 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <algorithm>
+#include <atomic>
+#include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <memory>
 #include <utility>
 
 #include "common/alignment.h"
 #include "common/assert.h"
-#include "common/bit_util.h"
 #include "common/common_types.h"
 #include "common/logging.h"
 #include "core/core.h"
+#include "core/hle/kernel/k_process.h"
 #include "core/hle/service/nvdrv/core/container.h"
 #include "core/hle/service/nvdrv/core/heap_mapper.h"
 #include "core/hle/service/nvdrv/core/nvmap.h"
@@ -24,14 +27,61 @@
 #include "core/hle/service/nvdrv/devices/nvhost_gpu.h"
 #include "core/hle/service/nvdrv/devices/nx2_stub_device.h"
 #include "core/hle/service/nvdrv/nvdrv.h"
+#include "core/memory.h"
 #include "video_core/control/channel_state.h"
 #include "video_core/gpu.h"
 #include "video_core/host1x/host1x.h"
 #include "video_core/memory_manager.h"
-#include "video_core/nx2.h"
 #include "video_core/rasterizer_interface.h"
 
 namespace Service::Nvidia::Devices {
+
+namespace {
+
+// A device (SMMU) range keeps the host pages that backed its CPU range when it was mapped. The
+// ranges are reused by CPU address and size: when nx2:gpu 102 destroyed the memory, the game
+// can unmap it and map new pages at the same address, register it again, and get the old device
+// range back. The GPU then reads the old pages, which the kernel may already have given to other
+// data (Ocarina of Time: meshes whose index and vertex bytes were an actor pack and texture
+// blocks, white areas after area changes). Points the range at the current pages again.
+void Nx2RefreshBacking(Tegra::MaxwellDeviceMemoryManager& smmu, Core::Memory::Memory& memory,
+                       Core::Asid asid, DAddr device_address, u64 cpu_address, u64 size) {
+    constexpr u64 PageSize = Core::Memory::YUZU_PAGESIZE;
+    constexpr uintptr_t PageMask = static_cast<uintptr_t>(Core::Memory::YUZU_PAGEMASK);
+    if ((cpu_address & Core::Memory::YUZU_PAGEMASK) != 0 ||
+        (device_address & Core::Memory::YUZU_PAGEMASK) != 0) {
+        return;
+    }
+    u64 stale_pages = 0;
+    u64 first_stale = 0;
+    for (u64 offset = 0; offset < size; offset += PageSize) {
+        const auto device_page =
+            reinterpret_cast<uintptr_t>(smmu.GetPointer<u8>(device_address + offset));
+        const auto cpu_page = reinterpret_cast<uintptr_t>(
+            memory.GetPointerSilent(Common::ProcessAddress{cpu_address + offset}));
+        if ((device_page & ~PageMask) != (cpu_page & ~PageMask)) {
+            if (stale_pages++ == 0) {
+                first_stale = offset;
+            }
+        }
+    }
+    if (stale_pages == 0) {
+        return;
+    }
+    static std::atomic<u32> reports{};
+    if (reports.fetch_add(1, std::memory_order_relaxed) < 256) {
+        LOG_WARNING(Service_NVDRV,
+                    "Switch 2 device range {:#x} of CPU {:#x}+{:#x}: {} of {} pages point at old "
+                    "memory (first at +{:#x}), mapped again",
+                    device_address, cpu_address, size, stale_pages,
+                    (size + PageSize - 1) / PageSize, first_stale);
+    }
+    // Unmapping drops the old pages from the reverse map and invalidates the caches over the range.
+    smmu.Unmap(device_address, size);
+    smmu.Map(device_address, cpu_address, size, asid, true);
+}
+
+} // namespace
 
 nvhost_as_gpu::nvhost_as_gpu(Core::System& system_, Module& module_, NvCore::Container& core)
     : nvdevice{system_}, module{module_}, container{core}, nvmap{core.GetNvMapFile()}, vm{},
@@ -146,6 +196,7 @@ void nvhost_as_gpu::Nx2Map(u64 gpu_address, u64 cpu_address, u64 size) {
     // The same CPU range is often mapped twice (at its own address and in a sparse region), so
     // reuse its SMMU mapping.
     Nx2DeviceRange range{};
+    bool fresh = false; ///< Mapped to the current pages just now
     if (const auto it = nx2_device_ranges.find({cpu_address, size}); it != nx2_device_ranges.end()) {
         range = it->second;
     } else if (session->has_preallocated_area && session->mapper->IsInBounds(cpu_address, size)) {
@@ -156,6 +207,7 @@ void nvhost_as_gpu::Nx2Map(u64 gpu_address, u64 cpu_address, u64 size) {
             const DAddr address = smmu.Allocate(Common::AlignUp(size, 0x20000));
             if (address != 0) {
                 smmu.Map(address, cpu_address, size, session->asid, true);
+                fresh = true;
             }
             return address;
         };
@@ -179,8 +231,19 @@ void nvhost_as_gpu::Nx2Map(u64 gpu_address, u64 cpu_address, u64 size) {
     Nx2GpuMemoryRegistry::Get().RecordDeviceRange(cpu_address, size, device_address);
     // On the GPU thread, like unmaps: a GMMU map takes the texture cache lock, and the callers hold
     // nx2:gpu locks that the GPU thread takes under that lock (sparse blocks backed on write).
+    // A reused range is checked there too, before the GMMU map, against the pages the CPU range
+    // has now (Nx2RefreshBacking).
+    auto process = fresh ? nullptr
+                         : std::make_shared<Kernel::KScopedAutoObject<Kernel::KProcess>>(
+                               system.Kernel(), session->process);
     system.GPU().MapInOrder(
-        gpu_address, size, [gmmu = gmmu.get(), gpu_address, device_address, size] {
+        gpu_address, size,
+        [gmmu = gmmu.get(), &smmu = system.Host1x().MemoryManager(), process = std::move(process),
+         asid = session->asid, gpu_address, cpu_address, device_address, size] {
+            if (process) {
+                Nx2RefreshBacking(smmu, process->GetPointerUnsafe()->GetMemory(), asid,
+                                  device_address, cpu_address, size);
+            }
             gmmu->Map(gpu_address, device_address, size, Tegra::PTEKind::PITCH, false);
         });
     LOG_DEBUG(Service_NVDRV, "Switch 2 GPU mapping {:#x}+{:#x} -> CPU {:#x}", gpu_address, size,
@@ -332,8 +395,6 @@ NvResult nvhost_as_gpu::Nx2GetSyncpointShimInfo(IoctlNx2SyncpointShimInfo& param
     return NvResult::Success;
 }
 
-/// Creates the GPU address space. Switch 2 page tables cover the VA given to NVN,
-/// which can extend past the va_range_end NvRm passed in.
 NvResult nvhost_as_gpu::AllocAsEx(IoctlAllocAsEx& params) {
     LOG_DEBUG(Service_NVDRV, "called, flags={:#x} big_page_size={:#x} va_range_start={:#x} va_range_end={:#x} va_range_split={:#x}", params.flags, params.big_page_size, params.va_range_start, params.va_range_end, params.va_range_split);
 
@@ -377,12 +438,7 @@ NvResult nvhost_as_gpu::AllocAsEx(IoctlAllocAsEx& params) {
         }
     }
 
-    // NVN allocates from the range nx2:gpu reports, which extends past NvRm's va_range_end.
-    // Size the page tables for the wider range, or a map such as 0x2109ec0000 (Nintendo
-    // GameCube - Nintendo Classics) indexes off the end of entries[].
-    const u64 covered_end = g_nx2_driver ? std::max(vm.va_range_end, Tegra::Nx2GpuVaEnd)
-                                         : vm.va_range_end;
-    const u64 max_big_page_bits = Common::Log2Ceil(covered_end);
+    const u64 max_big_page_bits = Common::Log2Ceil(vm.va_range_end);
 
     const auto start_pages{static_cast<u32>(vm.va_range_start >> VM::PAGE_SIZE_BITS)};
     const auto end_pages{static_cast<u32>(vm.va_range_split >> VM::PAGE_SIZE_BITS)};
@@ -399,8 +455,6 @@ NvResult nvhost_as_gpu::AllocAsEx(IoctlAllocAsEx& params) {
     gmmu = std::make_unique<Tegra::MemoryManager>(system, max_big_page_bits, vm.va_range_split, vm.big_page_size_bits, VM::PAGE_SIZE_BITS);
     system.GPU().InitAddressSpace(*gmmu);
     vm.initialised = true;
-    LOG_INFO(Service_NVDRV, "GPU address space {} created: VA [{:#x}, {:#x}), big pages from {:#x}",
-             gmmu->GetID(), vm.va_range_start, vm.va_range_end, vm.va_range_split);
 
     return NvResult::Success;
 }
@@ -676,8 +730,6 @@ NvResult nvhost_as_gpu::BindChannel(IoctlBindChannel& params) {
 
     auto gpu_channel_device = module.GetDevice<nvhost_gpu>(params.fd);
     gpu_channel_device->channel_state->memory_manager = gmmu.get();
-    LOG_INFO(Service_NVDRV, "Channel fd {} bound to GPU address space {}", static_cast<s32>(params.fd),
-             gmmu ? static_cast<s64>(gmmu->GetID()) : s64{-1});
     return NvResult::Success;
 }
 

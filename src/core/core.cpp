@@ -5,7 +5,6 @@
 #include <cstdlib>
 #include <atomic>
 #include <memory>
-#include <new>
 #include <utility>
 
 #include "game_settings.h"
@@ -35,6 +34,7 @@
 #include "core/file_sys/patch_manager.h"
 #include "core/file_sys/program_metadata.h"
 #include "core/file_sys/registered_cache.h"
+#include "core/file_sys/romfs.h"
 #include "core/file_sys/romfs_factory.h"
 #include "core/file_sys/savedata_factory.h"
 #include "core/file_sys/submission_package.h"
@@ -53,6 +53,7 @@
 #include "core/hle/service/am/process_creation.h"
 #include "core/hle/service/apm/apm_controller.h"
 #include "core/hle/service/filesystem/filesystem.h"
+#include "core/hle/service/filesystem/romfs_controller.h"
 #include "core/hle/service/glue/glue_manager.h"
 #include "core/hle/service/glue/time/static.h"
 #include "core/hle/service/psc/time/static.h"
@@ -65,6 +66,7 @@
 #include "core/hle/service/sm/sm.h"
 #include "core/internal_network/network.h"
 #include "core/loader/loader.h"
+#include "core/loader/nx.h"
 #include "core/memory.h"
 #include "core/memory/cheat_engine.h"
 #include "core/perf_stats.h"
@@ -74,15 +76,13 @@
 #include "hid_core/hid_core.h"
 #include "network/network.h"
 #include "video_core/host1x/host1x.h"
+#include "video_core/nx2_precompile.h"
 #include "video_core/renderer_base.h"
 #include "video_core/video_core.h"
 
 namespace Core {
 
 std::atomic<u64> g_nx2_present_count{};
-static_assert(std::atomic<u64>::is_always_lock_free);
-std::array<std::atomic<u64>, 4096> g_nx2_present_times_ns{};
-std::atomic<u32> g_nx2_present_time_services{};
 
 FileSys::VirtualFile GetGameFileFromPath(const FileSys::VirtualFilesystem& vfs,
                                          const std::string& path) {
@@ -147,6 +147,9 @@ bool IsSwitch2Program(const FileSys::VirtualFile& file, u64 program_id, std::siz
                metadata.IsSwitch2();
     }
     const auto type = file != nullptr ? Loader::IdentifyFile(file) : Loader::FileType::Unknown;
+    if (type == Loader::FileType::NX) {
+        return Loader::AppLoader_NX::ReadPlatform(file, program_id) == 2;
+    }
     if (type == Loader::FileType::XCI || type == Loader::FileType::XCZ) {
         const FileSys::XCI xci{file, program_id, program_index};
         if (xci.GetStatus() != Loader::ResultStatus::Success) {
@@ -192,15 +195,8 @@ struct System::Impl {
 
     u64 program_id;
 
-    bool Initialize(System& system) {
-        try {
-            device_memory.emplace();
-        } catch (const std::bad_alloc&) {
-            LOG_CRITICAL(Core, "Failed to allocate guest memory");
-        }
-        if (device_memory && !device_memory->buffer.BackingBasePointer()) {
-            device_memory.reset();
-        }
+    void Initialize(System& system) {
+        device_memory.emplace();
 
         is_multicore = Settings::values.use_multi_core.GetValue();
         memory_layout = Settings::values.memory_layout_mode.GetValue();
@@ -224,7 +220,6 @@ struct System::Impl {
         kernel.SetMulticore(is_multicore);
         cpu_manager.SetMulticore(is_multicore);
         cpu_manager.SetAsyncGpu(is_async_gpu);
-        return device_memory.has_value();
     }
 
     void ReinitializeIfNecessary(System& system) {
@@ -250,14 +245,22 @@ struct System::Impl {
             return;
         }
 
+        // The settings and time services start on the emulated cores, which only run once the
+        // game has finished loading (shaders included). Waiting for them here froze the UI
+        // thread for the whole loading screen when settings were applied during it. If they
+        // are not up yet there is nothing to refresh: they read the current settings when
+        // they start.
+        auto& service_manager = system.ServiceManager();
         auto settings_service =
-            system.ServiceManager().GetService<Service::Set::ISystemSettingsServer>("set:sys",
-                                                                                    true);
+            service_manager.GetService<Service::Set::ISystemSettingsServer>("set:sys");
         auto static_service_a =
-            system.ServiceManager().GetService<Service::Glue::Time::StaticService>("time:a", true);
-
+            service_manager.GetService<Service::Glue::Time::StaticService>("time:a");
         auto static_service_s =
-            system.ServiceManager().GetService<Service::PSC::Time::StaticService>("time:s", true);
+            service_manager.GetService<Service::PSC::Time::StaticService>("time:s");
+        if (!settings_service || !static_service_a || !static_service_s) {
+            LOG_INFO(Core, "Time services not started yet, they will use the current settings");
+            return;
+        }
 
         std::shared_ptr<Service::PSC::Time::SystemClock> user_clock;
         static_service_a->GetStandardUserSystemClock(&user_clock);
@@ -344,17 +347,12 @@ struct System::Impl {
         debugger.emplace(system, port);
     }
 
-    SystemResultStatus InitializeKernel(System& system) {
+    void InitializeKernel(System& system) {
         LOG_DEBUG(Core, "initialized OK");
 
         // Setting changes may require a full system reinitialization (e.g., disabling multicore).
         ReinitializeIfNecessary(system);
-        if (!device_memory) {
-            LOG_CRITICAL(Core, "Not enough host memory to start the guest kernel");
-            return SystemResultStatus::ErrorMemoryAllocation;
-        }
         kernel.Initialize();
-        return SystemResultStatus::Success;
     }
 
     SystemResultStatus SetupForApplicationProcess(System& system, Frontend::EmuWindow& emu_window) {
@@ -415,19 +413,8 @@ struct System::Impl {
                                               : Common::WallClock::CNTFRQ;
         Common::g_wall_clock.SetGuestCNTFRQ(cntfrq);
         LOG_INFO(Core, "Guest counter frequency: {} Hz", cntfrq);
-        // The guest clocks derive from the host TSC calibration (or the OS clock). A wrong rate
-        // there skews every guest timer by a constant factor (#105), so record what was measured:
-        // tsc vs the CPUID base/max frequency is a sanity check at a glance.
-#ifdef ARCHITECTURE_x86_64
-        LOG_INFO(Core, "Host clock: tsc {} Hz, cpu base {} MHz, max {} MHz, invariant {}",
-                 Common::g_cpu_caps.tsc_frequency, Common::g_cpu_caps.base_frequency,
-                 Common::g_cpu_caps.max_frequency, Common::g_cpu_caps.invariant_tsc);
-#endif
 
-        const auto kernel_result = InitializeKernel(system);
-        if (kernel_result != SystemResultStatus::Success) {
-            return kernel_result;
-        }
+        InitializeKernel(system);
 
         if (params.applet_type == Service::AM::AppletType::Application) {
             current_application_filepath = filepath;
@@ -447,6 +434,9 @@ struct System::Impl {
 
         if (!app_loader) {
             LOG_CRITICAL(Core, "Failed to obtain loader for {}!", filepath);
+            // The kernel is already initialized. Left running, it is destroyed with the global
+            // System after main() returns, when device memory is already gone, and exit crashes.
+            ShutdownMainProcess();
             return SystemResultStatus::ErrorGetLoader;
         }
 
@@ -483,6 +473,27 @@ struct System::Impl {
         // Initialize cheat engine
         if (cheat_engine) {
             cheat_engine->Initialize();
+        }
+
+        // EDEN_NX2_PRECOMPILE: the game's files, for assembling a precompile recipe (#895) on the
+        // pipeline cache's preparation thread. The RomFS as the process reads it, update included.
+        if (VideoCommon::Nx2Precompile::Mode() != 0) {
+            const u64 process_id = process->GetHandle()->GetProcessId();
+            VideoCommon::Nx2Precompile::SetGameFiles(
+                params.program_id, [this, process_id]() -> std::vector<FileSys::VirtualDir> {
+                    Service::FileSystem::ProgramId program{};
+                    std::shared_ptr<Service::FileSystem::SaveDataController> save;
+                    std::shared_ptr<Service::FileSystem::RomFsController> romfs;
+                    if (fs_controller.OpenProcess(&program, &save, &romfs, process_id).IsError() ||
+                        !romfs) {
+                        return {};
+                    }
+                    auto dir = FileSys::ExtractRomFS(romfs->OpenRomFSCurrentProcess());
+                    if (!dir) {
+                        return {};
+                    }
+                    return {std::move(dir)};
+                });
         }
 
         // Register with applet manager
@@ -526,6 +537,8 @@ struct System::Impl {
 
     void ShutdownMainProcess() {
         debug_service.reset();
+        // Waits for a call in progress (it opens the RomFS, a quick step).
+        VideoCommon::Nx2Precompile::SetGameFiles(0, {});
         SetShuttingDown(true);
         Common::ADPF::Shutdown();
 
@@ -683,8 +696,8 @@ const CpuManager& System::GetCpuManager() const {
     return impl->cpu_manager;
 }
 
-bool System::Initialize() {
-    return impl->Initialize(*this);
+void System::Initialize() {
+    impl->Initialize(*this);
 }
 
 void System::Run() {

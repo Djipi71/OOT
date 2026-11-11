@@ -3,8 +3,12 @@
 #include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <optional>
 #include <string>
+#include <string_view>
 #include <unordered_map>
+#include <utility>
+#include <vector>
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -43,278 +47,194 @@ std::string ReadAll(const std::filesystem::path& file) {
     return {std::istreambuf_iterator<char>(stream), std::istreambuf_iterator<char>()};
 }
 
+std::string Header(u32 version) {
+    return std::string(Magic.data(), Magic.size()) +
+           std::string(reinterpret_cast<const char*>(&version), sizeof(version));
+}
+
+std::string Header(u32 version) {
+    return std::string(Magic.data(), Magic.size()) +
+           std::string(reinterpret_cast<const char*>(&version), sizeof(version));
+}
+
+// Merge tests use records of a key, a size and that many bytes.
+std::string Record(u32 key, std::string_view body) {
+    std::string record(reinterpret_cast<const char*>(&key), sizeof(key));
+    const u32 size = static_cast<u32>(body.size());
+    record.append(reinterpret_cast<const char*>(&size), sizeof(size));
+    record.append(body);
+    return record;
+}
+
+std::optional<std::string> ReadRecordKey(std::ifstream& file, std::streamoff end) {
+    u32 key{};
+    u32 size{};
+    file.read(reinterpret_cast<char*>(&key), sizeof(key));
+    file.read(reinterpret_cast<char*>(&size), sizeof(size));
+    if (size > end) {
+        return std::nullopt;
+    }
+    std::string body(size, '\0');
+    file.read(body.data(), size);
+    return std::string(reinterpret_cast<const char*>(&key), sizeof(key));
+}
+
+VideoCommon::PipelineCacheMergeResult Merge(const std::filesystem::path& source,
+                                            const std::filesystem::path& destination,
+                                            std::optional<VideoCommon::PipelineKeySet>& keys) {
+    return VideoCommon::MergePipelineCache(source, destination, Magic, 54, 52, ReadRecordKey,
+                                           keys);
+}
+
+void WriteUsed(const std::filesystem::path& file, u32 magic,
+               const std::vector<std::pair<u64, u8>>& entries, u32 count) {
+    std::ofstream stream(file, std::ios::binary);
+    stream.write(reinterpret_cast<const char*>(&magic), sizeof(magic));
+    stream.write(reinterpret_cast<const char*>(&count), sizeof(count));
+    for (const auto& [hash, age] : entries) {
+        stream.write(reinterpret_cast<const char*>(&hash), sizeof(hash));
+        stream.write(reinterpret_cast<const char*>(&age), sizeof(age));
+    }
+}
+
+std::unordered_map<u64, u8> ReadUsed(const std::filesystem::path& file) {
+    std::ifstream stream(file, std::ios::binary);
+    u32 magic{};
+    u32 count{};
+    stream.read(reinterpret_cast<char*>(&magic), sizeof(magic));
+    stream.read(reinterpret_cast<char*>(&count), sizeof(count));
+    std::unordered_map<u64, u8> used;
+    for (u32 i = 0; i < count; ++i) {
+        u64 hash{};
+        u8 age{};
+        stream.read(reinterpret_cast<char*>(&hash), sizeof(hash));
+        stream.read(reinterpret_cast<char*>(&age), sizeof(age));
+        used.emplace(hash, age);
+    }
+    return used;
+}
+
+constexpr u32 UsedMagic = 0x31505545;
+
 } // Anonymous namespace
 
-TEST_CASE("Task and mesh disk environments roundtrip all translation state and record boundaries",
-          "[pipeline_cache_files][mesh_serialization]") {
+TEST_CASE("A newer cache's pipelines are appended once, its source untouched",
+          "[pipeline_cache_files]") {
     TempDir temp;
-    const auto path = temp.path / "mesh.bin";
-    constexpr u64 key = 0xabcdef;
-    for (const auto stage : {Shader::Stage::Task, Shader::Stage::Mesh, Shader::Stage::Fragment}) {
-        SerializedEnvironment source{stage};
-        const std::array<const VideoCommon::GenericEnvironment*, 1> envs{&source};
-        VideoCommon::SerializePipeline(key, envs, path, VideoCommon::VulkanPipelineCacheVersion);
-    }
-    size_t read = 0;
-    VideoCommon::LoadPipelines(
-        {}, path, VideoCommon::VulkanPipelineCacheVersion,
-        [](std::ifstream&, VideoCommon::FileEnvironment) { FAIL("Unexpected compute record"); },
-        [&](std::ifstream& file, std::vector<VideoCommon::FileEnvironment> envs) {
-            const std::array stages{Shader::Stage::Task, Shader::Stage::Mesh,
-                                    Shader::Stage::Fragment};
-            REQUIRE(read < stages.size());
-            REQUIRE(envs.size() == 1);
-            auto& restored = envs.front();
-            SerializedEnvironment source{stages[read++]};
-            REQUIRE(restored.ShaderStage() == source.ShaderStage());
-            REQUIRE(restored.ReadInstruction(0) == 0x123456789abcdef0);
-            REQUIRE(restored.ReadInstruction(8) == 0xfedcba9876543210);
-            REQUIRE(restored.ReadCbufValue(1, 16) == 0x1357);
-            REQUIRE(restored.ReadTextureType(3) == Shader::TextureType::Color2D);
-            REQUIRE(restored.TextureBoundBuffer() == 2);
-            REQUIRE(restored.MemorySize() > sizeof(restored) + 2 * sizeof(u64));
-            if (source.ShaderStage() != Shader::Stage::Fragment) {
-                REQUIRE(restored.MeshRegisters() == source.MeshRegisters());
-                REQUIRE(std::memcmp(&restored.MeshPrimitiveHeader(), &source.MeshPrimitiveHeader(),
-                                    sizeof(Shader::ProgramHeader)) == 0);
-            }
-            u64 restored_key{};
-            file.read(reinterpret_cast<char*>(&restored_key), sizeof(restored_key));
-            REQUIRE(restored_key == key);
-        });
-    REQUIRE(read == 3);
+    const auto own = temp.path / "vulkan-frizti.fork-v52.bin";
+    const auto zortos = temp.path / "vulkan.fork-v54.bin";
+    const std::string own_body = Record(1, "a") + Record(2, "b");
+    WriteCache(own, Magic, 52, own_body);
+    // Key 3 was stored twice (a rebuilt translation): both records come along.
+    const std::string new_records = Record(3, "c") + Record(3, "cc") + Record(4, "d");
+    WriteCache(zortos, Magic, 54, Record(2, "other b") + new_records);
+    const std::string source_before = ReadAll(zortos);
+
+    std::optional<VideoCommon::PipelineKeySet> keys;
+    const auto result = Merge(zortos, own, keys);
+    REQUIRE(result.status == VideoCommon::PipelineCacheMergeResult::Status::Merged);
+    CHECK(result.added_pipelines == 2);
+    CHECK(result.added_records == 3);
+    CHECK(result.known_pipelines == 1);
+    CHECK(ReadAll(own) == Header(52) + own_body + new_records);
+    CHECK(ReadAll(zortos) == source_before);
+    CHECK_FALSE(std::filesystem::exists(temp.path / "vulkan-frizti.fork-v52.bin.merging"));
+
+    // Merging again adds nothing, with the keys kept or scanned anew.
+    const std::string merged = ReadAll(own);
+    CHECK(Merge(zortos, own, keys).added_records == 0);
+    std::optional<VideoCommon::PipelineKeySet> fresh;
+    CHECK(Merge(zortos, own, fresh).added_records == 0);
+    CHECK(ReadAll(own) == merged);
 }
 
-TEST_CASE("Compatible v52 pipelines migrate without changing or discarding the old warm cache",
-          "[pipeline_cache_files][mesh_serialization]") {
+TEST_CASE("A cache is created from a newer one when there is none", "[pipeline_cache_files]") {
     TempDir temp;
-    const auto old = VideoCommon::VersionedPipelineCachePath(temp.path, "vulkan", 52);
-    const auto current = VideoCommon::VersionedPipelineCachePath(
-        temp.path, "vulkan", VideoCommon::VulkanPipelineCacheVersion);
-    SerializedEnvironment source{Shader::Stage::Fragment};
-    const std::array<const VideoCommon::GenericEnvironment*, 1> envs{&source};
-    constexpr u64 key = 42;
-    VideoCommon::SerializePipeline(key, envs, old, 52);
-    const auto before = ReadAll(old);
-    REQUIRE(VideoCommon::CopyCompatiblePipelineCache(old, current, Magic, 52,
-                                                     VideoCommon::VulkanPipelineCacheVersion));
-    REQUIRE(ReadAll(old) == before);
-    REQUIRE(ReadAll(current).substr(12) == before.substr(12));
-    REQUIRE_FALSE(VideoCommon::CopyCompatiblePipelineCache(
-        old, current, Magic, 52, VideoCommon::VulkanPipelineCacheVersion));
-    bool loaded = false;
-    VideoCommon::LoadPipelines(
-        {}, current, VideoCommon::VulkanPipelineCacheVersion,
-        [](std::ifstream&, VideoCommon::FileEnvironment) { FAIL("Unexpected compute record"); },
-        [&](std::ifstream& file, std::vector<VideoCommon::FileEnvironment> restored) {
-            REQUIRE(restored.size() == 1);
-            REQUIRE(restored.front().ShaderStage() == Shader::Stage::Fragment);
-            u64 restored_key{};
-            file.read(reinterpret_cast<char*>(&restored_key), sizeof(restored_key));
-            REQUIRE(restored_key == key);
-            loaded = true;
-        });
-    REQUIRE(loaded);
-    const auto other = temp.path / "wrong.bin";
-    REQUIRE_FALSE(VideoCommon::CopyCompatiblePipelineCache(old, other, Magic, 51, 53));
-    REQUIRE_FALSE(std::filesystem::exists(other));
+    const auto own = temp.path / "vulkan-frizti.fork-v52.bin";
+    const auto zortos = temp.path / "vulkan.fork-v54.bin";
+    WriteCache(zortos, Magic, 54, Record(7, "x") + Record(8, "y"));
+    std::optional<VideoCommon::PipelineKeySet> keys;
+    const auto result = Merge(zortos, own, keys);
+    REQUIRE(result.status == VideoCommon::PipelineCacheMergeResult::Status::Merged);
+    CHECK(result.added_pipelines == 2);
+    CHECK(ReadAll(own) == Header(52) + Record(7, "x") + Record(8, "y"));
 }
 
-TEST_CASE("Compatible pipeline cache migration retries after an interrupted temporary copy",
-          "[pipeline_cache_files][mesh_serialization][migration_retry]") {
+TEST_CASE("A broken or foreign cache is never merged", "[pipeline_cache_files]") {
+    using Status = VideoCommon::PipelineCacheMergeResult::Status;
     TempDir temp;
-    const auto old = VideoCommon::VersionedPipelineCachePath(temp.path, "vulkan", 52);
-    const auto current = VideoCommon::VersionedPipelineCachePath(
-        temp.path, "vulkan", VideoCommon::VulkanPipelineCacheVersion);
-    auto temporary = current;
-    temporary += ".migrating";
-    WriteCache(old, Magic, 52, "complete pipeline records");
-    const auto before = ReadAll(old);
-    {
-        std::ofstream stream(temporary, std::ios::binary);
-        stream.write(before.data(), 4);
-    }
-    REQUIRE(ReadAll(temporary) == before.substr(0, 4));
-    REQUIRE(VideoCommon::CopyCompatiblePipelineCache(old, current, Magic, 52,
-                                                     VideoCommon::VulkanPipelineCacheVersion));
-    REQUIRE(ReadAll(old) == before);
-    REQUIRE(VideoCommon::PipelineCacheHeaderMatches(
-        current, Magic, VideoCommon::VulkanPipelineCacheVersion));
-    REQUIRE(ReadAll(current).substr(12) == before.substr(12));
-    REQUIRE_FALSE(std::filesystem::exists(temporary));
-    const auto migrated = ReadAll(current);
-    REQUIRE_FALSE(VideoCommon::CopyCompatiblePipelineCache(
-        old, current, Magic, 52, VideoCommon::VulkanPipelineCacheVersion));
-    REQUIRE(ReadAll(current) == migrated);
-    REQUIRE(ReadAll(old) == before);
+    const auto own = temp.path / "vulkan-frizti.fork-v52.bin";
+    const auto zortos = temp.path / "vulkan.fork-v54.bin";
+    WriteCache(own, Magic, 52, Record(1, "a"));
+    const std::string own_before = ReadAll(own);
+
+    // The last record is cut short: nothing at all is taken, not even the first new one.
+    WriteCache(zortos, Magic, 54, Record(5, "new") + Record(6, "truncated").substr(0, 10));
+    std::optional<VideoCommon::PipelineKeySet> keys;
+    CHECK(Merge(zortos, own, keys).status == Status::BadSource);
+    CHECK(ReadAll(own) == own_before);
+
+    WriteCache(zortos, Magic, 53, Record(5, "new"));
+    CHECK(Merge(zortos, own, keys).status == Status::WrongHeader);
+    WriteCache(zortos, OtherMagic, 54, Record(5, "new"));
+    CHECK(Merge(zortos, own, keys).status == Status::WrongHeader);
+    CHECK(Merge(temp.path / "missing.bin", own, keys).status == Status::Missing);
+    CHECK(ReadAll(own) == own_before);
+
+    // Our own cache does not parse: it is left for the loader as it is.
+    WriteCache(zortos, Magic, 54, Record(5, "new"));
+    WriteCache(own, Magic, 52, Record(1, "a").substr(0, 6));
+    const std::string broken_own = ReadAll(own);
+    std::optional<VideoCommon::PipelineKeySet> fresh;
+    CHECK(Merge(zortos, own, fresh).status == Status::BadDestination);
+    CHECK(ReadAll(own) == broken_own);
+    CHECK_FALSE(std::filesystem::exists(temp.path / "vulkan-frizti.fork-v52.bin.merging"));
 }
 
-TEST_CASE("A new cache version starts from the newest compatible cache on disk",
-          "[pipeline_cache_files][carry_over]") {
+TEST_CASE("Used pipeline lists are merged with the lowest age", "[pipeline_cache_files]") {
     TempDir temp;
-    const auto v52 = VideoCommon::VersionedPipelineCachePath(temp.path, "vulkan", 52);
-    const auto v53 = VideoCommon::VersionedPipelineCachePath(temp.path, "vulkan", 53);
-    const auto v54 = VideoCommon::VersionedPipelineCachePath(temp.path, "vulkan", 54);
-    WriteCache(v52, Magic, 52, "older pipelines");
-    WriteCache(v53, Magic, 53, "newer pipelines");
-    const auto before_v52 = ReadAll(v52);
-    const auto before_v53 = ReadAll(v53);
-    constexpr std::array<u32, 2> versions{53, 52};
-    const auto carried =
-        VideoCommon::CarryOverPipelineCache(temp.path, "vulkan", Magic, versions, 54);
-    REQUIRE(carried.version == 53u);
-    REQUIRE_FALSE(carried.failed);
-    REQUIRE(VideoCommon::PipelineCacheHeaderMatches(v54, Magic, 54));
-    REQUIRE(ReadAll(v54).substr(12) == "newer pipelines");
-    REQUIRE(ReadAll(v52) == before_v52);
-    REQUIRE(ReadAll(v53) == before_v53);
-    // A cache of its own version is never replaced, even when an older one changes later.
-    WriteCache(v53, Magic, 53, "written by the older build since");
-    const auto again =
-        VideoCommon::CarryOverPipelineCache(temp.path, "vulkan", Magic, versions, 54);
-    REQUIRE_FALSE(again.version);
-    REQUIRE_FALSE(again.failed);
-    REQUIRE(ReadAll(v54).substr(12) == "newer pipelines");
+    const auto own = temp.path / "own_used.bin";
+    const auto zortos = temp.path / "zortos_used.bin";
+    WriteUsed(own, UsedMagic, {{1, 0}, {2, 3}}, 2);
+    WriteUsed(zortos, UsedMagic, {{2, 1}, {3, 0}, {4, 5}}, 3);
+    REQUIRE(VideoCommon::MergeUsedPipelineLists(zortos, own, UsedMagic) == 2);
+    const auto used = ReadUsed(own);
+    CHECK(used == std::unordered_map<u64, u8>{{1, 0}, {2, 1}, {3, 0}, {4, 5}});
+
+    // A truncated list or one of another format changes nothing.
+    const std::string before = ReadAll(own);
+    WriteUsed(zortos, UsedMagic, {{9, 0}}, 2);
+    CHECK_FALSE(VideoCommon::MergeUsedPipelineLists(zortos, own, UsedMagic));
+    WriteUsed(zortos, UsedMagic + 1, {{9, 0}}, 1);
+    CHECK_FALSE(VideoCommon::MergeUsedPipelineLists(zortos, own, UsedMagic));
+    CHECK(ReadAll(own) == before);
+
+    // With no list of our own, the other one is taken whole.
+    const auto missing = temp.path / "missing_used.bin";
+    WriteUsed(zortos, UsedMagic, {{9, 0}}, 1);
+    CHECK(VideoCommon::MergeUsedPipelineLists(zortos, missing, UsedMagic) == 1);
+    CHECK(ReadUsed(missing) == std::unordered_map<u64, u8>{{9, 0}});
 }
 
-TEST_CASE("A new cache version skips an older file that isn't its cache",
-          "[pipeline_cache_files][carry_over]") {
+TEST_CASE("The merge log records each source's size and time", "[pipeline_cache_files]") {
     TempDir temp;
-    constexpr std::array<u32, 2> versions{53, 52};
-    WriteCache(VideoCommon::VersionedPipelineCachePath(temp.path, "vulkan", 53), OtherMagic, 53,
-               "another cache");
-    WriteCache(VideoCommon::VersionedPipelineCachePath(temp.path, "vulkan", 52), Magic, 52,
-               "older pipelines");
-    REQUIRE(VideoCommon::CarryOverPipelineCache(temp.path, "vulkan", Magic, versions, 54).version ==
-            52u);
-    REQUIRE(ReadAll(VideoCommon::VersionedPipelineCachePath(temp.path, "vulkan", 54)).substr(12) ==
-            "older pipelines");
-}
+    const auto source = temp.path / "vulkan.fork-v54.bin";
+    const auto log_file = temp.path / "vulkan-frizti.fork-v52.bin.merged";
+    WriteCache(source, Magic, 54, Record(1, "a"));
+    const auto stamp = VideoCommon::StampPipelineCacheFile(source);
+    REQUIRE(stamp);
+    CHECK(stamp->size == ReadAll(source).size());
+    CHECK_FALSE(VideoCommon::StampPipelineCacheFile(temp.path / "missing.bin"));
 
-TEST_CASE("A newer cache that can't be copied doesn't make way for an older one",
-          "[pipeline_cache_files][carry_over]") {
-    TempDir temp;
-    constexpr std::array<u32, 2> versions{53, 52};
-    const auto v54 = VideoCommon::VersionedPipelineCachePath(temp.path, "vulkan", 54);
-    WriteCache(VideoCommon::VersionedPipelineCachePath(temp.path, "vulkan", 53), Magic, 53,
-               "newer pipelines");
-    WriteCache(VideoCommon::VersionedPipelineCachePath(temp.path, "vulkan", 52), Magic, 52,
-               "older pipelines");
-    // A directory where the copy goes makes it fail.
-    auto temporary = v54;
-    temporary += ".migrating";
-    std::filesystem::create_directory(temporary);
-    const auto carried =
-        VideoCommon::CarryOverPipelineCache(temp.path, "vulkan", Magic, versions, 54);
-    REQUIRE(carried.failed);
-    REQUIRE_FALSE(carried.version);
-    REQUIRE_FALSE(std::filesystem::exists(v54));
-}
+    VideoCommon::PipelineMergeLog log;
+    log.emplace("vulkan.fork-v54.bin", *stamp);
+    log.emplace("vulkan_used.fork-v54.bin", VideoCommon::PipelineCacheFileStamp{9, -3});
+    REQUIRE(VideoCommon::WritePipelineMergeLog(log_file, log));
+    CHECK(VideoCommon::ReadPipelineMergeLog(log_file) == log);
+    CHECK(VideoCommon::ReadPipelineMergeLog(temp.path / "missing.merged").empty());
 
-TEST_CASE("A new cache version without a compatible cache starts empty",
-          "[pipeline_cache_files][carry_over]") {
-    TempDir temp;
-    constexpr std::array<u32, 2> versions{53, 52};
-    WriteCache(VideoCommon::VersionedPipelineCachePath(temp.path, "vulkan", 51), Magic, 51,
-               "another record layout");
-    const auto carried =
-        VideoCommon::CarryOverPipelineCache(temp.path, "vulkan", Magic, versions, 54);
-    REQUIRE_FALSE(carried.version);
-    REQUIRE_FALSE(carried.failed);
-    REQUIRE_FALSE(
-        std::filesystem::exists(VideoCommon::VersionedPipelineCachePath(temp.path, "vulkan", 54)));
-}
-
-TEST_CASE("The current Vulkan cache starts from the newest version it lists",
-          "[pipeline_cache_files][carry_over]") {
-    const std::span<const u32> versions{VideoCommon::CompatibleVulkanPipelineCacheVersions};
-    if (versions.empty()) {
-        return;
-    }
-    TempDir temp;
-    WriteCache(VideoCommon::VersionedPipelineCachePath(temp.path, "vulkan", versions.front()),
-               Magic, versions.front(), "pipelines");
-    const auto carried =
-        VideoCommon::CarryOverPipelineCache(temp.path, "vulkan", VideoCommon::PipelineCacheMagic,
-                                            versions, VideoCommon::VulkanPipelineCacheVersion);
-    REQUIRE(carried.version == versions.front());
-    REQUIRE(VideoCommon::PipelineCacheHeaderMatches(
-        VideoCommon::VersionedPipelineCachePath(temp.path, "vulkan",
-                                                VideoCommon::VulkanPipelineCacheVersion),
-        VideoCommon::PipelineCacheMagic, VideoCommon::VulkanPipelineCacheVersion));
-}
-
-TEST_CASE("A cleared cache stays empty while an older cache could replace it",
-          "[pipeline_cache_files][carry_over]") {
-    TempDir temp;
-    constexpr std::array<u32, 2> versions{53, 52};
-    const auto v53 = VideoCommon::VersionedPipelineCachePath(temp.path, "vulkan", 53);
-    const auto v54 = VideoCommon::VersionedPipelineCachePath(temp.path, "vulkan", 54);
-    WriteCache(v53, Magic, 53, "pipelines");
-    const auto before_v53 = ReadAll(v53);
-    REQUIRE(VideoCommon::CarryOverPipelineCache(temp.path, "vulkan", Magic, versions, 54).version);
-    REQUIRE(VideoCommon::ClearPipelineCache(temp.path, "vulkan", Magic, versions, 54) ==
-            VideoCommon::PipelineCacheClear::Cleared);
-    REQUIRE(ReadAll(v54).size() == 12);
-    REQUIRE(VideoCommon::PipelineCacheHeaderMatches(v54, Magic, 54));
-    REQUIRE(ReadAll(v53) == before_v53);
-    const auto carried =
-        VideoCommon::CarryOverPipelineCache(temp.path, "vulkan", Magic, versions, 54);
-    REQUIRE_FALSE(carried.version);
-    REQUIRE_FALSE(carried.failed);
-    REQUIRE(ReadAll(v54).size() == 12);
-}
-
-TEST_CASE("A cleared cache without an older one is removed", "[pipeline_cache_files][carry_over]") {
-    TempDir temp;
-    constexpr std::array<u32, 2> versions{53, 52};
-    const auto v54 = VideoCommon::VersionedPipelineCachePath(temp.path, "vulkan", 54);
-    REQUIRE(VideoCommon::ClearPipelineCache(temp.path, "vulkan", Magic, versions, 54) ==
-            VideoCommon::PipelineCacheClear::Missing);
-    WriteCache(v54, Magic, 54, "pipelines");
-    REQUIRE(VideoCommon::ClearPipelineCache(temp.path, "vulkan", Magic, versions, 54) ==
-            VideoCommon::PipelineCacheClear::Cleared);
-    REQUIRE_FALSE(std::filesystem::exists(v54));
-    REQUIRE(VideoCommon::ClearPipelineCache(temp.path, "vulkan", Magic, versions, 54) ==
-            VideoCommon::PipelineCacheClear::Missing);
-}
-
-TEST_CASE("Truncated mesh state is rejected before a pipeline can be queued",
-          "[pipeline_cache_files][mesh_serialization]") {
-    TempDir temp;
-    const auto path = temp.path / "truncated-mesh.bin";
-    SerializedEnvironment source{Shader::Stage::Mesh};
-    const std::array<const VideoCommon::GenericEnvironment*, 1> envs{&source};
-    constexpr u64 key = 42;
-    VideoCommon::SerializePipeline(key, envs, path, VideoCommon::VulkanPipelineCacheVersion);
-    std::filesystem::resize_file(path, std::filesystem::file_size(path) - sizeof(key) - 1);
-    VideoCommon::LoadPipelines(
-        {}, path, VideoCommon::VulkanPipelineCacheVersion,
-        [](std::ifstream&, VideoCommon::FileEnvironment) { FAIL("Unexpected compute record"); },
-        [](std::ifstream&, std::vector<VideoCommon::FileEnvironment>) {
-            FAIL("Incomplete mesh state reached pipeline creation");
-        });
-    REQUIRE_FALSE(std::filesystem::exists(path));
-}
-
-TEST_CASE("Cancelled mesh loading preserves its disk cache and queues no work",
-          "[pipeline_cache_files][mesh_serialization]") {
-    TempDir temp;
-    const auto path = temp.path / "cancelled-mesh.bin";
-    SerializedEnvironment source{Shader::Stage::Mesh};
-    const std::array<const VideoCommon::GenericEnvironment*, 1> envs{&source};
-    constexpr u64 key = 42;
-    VideoCommon::SerializePipeline(key, envs, path, VideoCommon::VulkanPipelineCacheVersion);
-    const auto before = ReadAll(path);
-    std::stop_source stop;
-    stop.request_stop();
-    VideoCommon::LoadPipelines(
-        stop.get_token(), path, VideoCommon::VulkanPipelineCacheVersion,
-        [](std::ifstream&, VideoCommon::FileEnvironment) { FAIL("Unexpected compute record"); },
-        [](std::ifstream&, std::vector<VideoCommon::FileEnvironment>) {
-            FAIL("Cancelled load reached pipeline creation");
-        });
-    REQUIRE(ReadAll(path) == before);
+    WriteCache(source, Magic, 54, Record(1, "a") + Record(2, "b"));
+    CHECK(VideoCommon::StampPipelineCacheFile(source) != stamp);
 }
 
 TEST_CASE("Pipeline cache names are version-suffixed per build", "[pipeline_cache_files]") {

@@ -4,7 +4,6 @@
 // SPDX-FileCopyrightText: Copyright 2021 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-#include <cstdlib>
 #include <algorithm>
 #include <array>
 #include <bit>
@@ -102,6 +101,8 @@ struct StorageInfo {
     StorageBufferSet unbounded_writes;
     /// A store or atomic stayed global without a buffer: it may land in any written buffer
     bool untracked_writes{};
+    /// A load stayed global without a buffer: it may read any bound buffer
+    bool untracked_reads{};
 };
 
 /// Returns true when the instruction is a global memory instruction
@@ -1485,15 +1486,20 @@ bool CollectStorageBuffers(IR::Block& block, IR::Inst& inst, StorageInfo& info, 
     return true;
 }
 
-/// Bytes a global store or atomic writes
-u32 StoreSize(IR::Opcode opcode) {
+/// Bytes a global load, store or atomic accesses
+u32 AccessSize(IR::Opcode opcode) {
     switch (opcode) {
+    case IR::Opcode::LoadGlobalS8:
+    case IR::Opcode::LoadGlobalU8:
     case IR::Opcode::WriteGlobalS8:
     case IR::Opcode::WriteGlobalU8:
         return 1;
+    case IR::Opcode::LoadGlobalS16:
+    case IR::Opcode::LoadGlobalU16:
     case IR::Opcode::WriteGlobalS16:
     case IR::Opcode::WriteGlobalU16:
         return 2;
+    case IR::Opcode::LoadGlobal64:
     case IR::Opcode::WriteGlobal64:
     case IR::Opcode::GlobalAtomicIAdd64:
     case IR::Opcode::GlobalAtomicSMin64:
@@ -1517,6 +1523,7 @@ u32 StoreSize(IR::Opcode opcode) {
     case IR::Opcode::GlobalAtomicMinF32x2:
     case IR::Opcode::GlobalAtomicMaxF32x2:
         return 8;
+    case IR::Opcode::LoadGlobal128:
     case IR::Opcode::WriteGlobal128:
         return 16;
     default:
@@ -1524,19 +1531,30 @@ u32 StoreSize(IR::Opcode opcode) {
     }
 }
 
+/// Whether a global memory instruction reads memory: a load or an atomic, not a plain store
+bool IsGlobalMemoryRead(const IR::Inst& inst) {
+    switch (inst.GetOpcode()) {
+    case IR::Opcode::WriteGlobalS8:
+    case IR::Opcode::WriteGlobalU8:
+    case IR::Opcode::WriteGlobalS16:
+    case IR::Opcode::WriteGlobalU16:
+    case IR::Opcode::WriteGlobal32:
+    case IR::Opcode::WriteGlobal64:
+    case IR::Opcode::WriteGlobal128:
+        return false;
+    default:
+        return true;
+    }
+}
+
 /// An upper bound of an unsigned 32-bit value for every invocation of a dispatch:
 /// c + sum(coef[i] * id[i]) over gl_LocalInvocationID.xyz (0-2) and gl_WorkGroupID.xyz (3-5),
 /// plus `base` times the storage buffer's pointer word. All coefficients are non-negative, so the
 /// bound is largest at the largest ids.
-/// An exact bound is the value itself modulo 2^32, so a negative c means the value can wrap below
-/// zero and is no bound for an unsigned operation. An inexact bound (a select, mask, shift or field
-/// extract) is only an upper bound, with c >= 0: subtracting from it or scaling a value that can
-/// wrap by it can wrap too, so those leave the value unknown.
 struct IdBound {
     s64 c{};
     std::array<u64, 6> coef{};
     u32 base{};
-    bool exact{true};
 
     bool IsConstant() const {
         return base == 0 && std::ranges::all_of(coef, [](u64 value) { return value == 0; });
@@ -1546,17 +1564,18 @@ struct IdBound {
     }
 };
 
-/// Proves where a program's stores to one storage buffer can land relative to its pointer word.
-/// Anything not provably affine in the invocation and workgroup ids with constant non-negative
-/// strides (a value loaded from memory or read from another constant buffer word, a loop-carried
-/// index, a signed or 64-bit computation) leaves the extent unknown.
+/// Proves where a program's accesses to one storage buffer (its stores, or its loads and atomics)
+/// can land relative to its pointer word. Anything not provably affine in the invocation and
+/// workgroup ids with constant non-negative strides (a value loaded from memory or read from
+/// another constant buffer word, a loop-carried index, a signed or 64-bit computation) leaves the
+/// extent unknown.
 class StoreExtentAnalysis {
 public:
     explicit StoreExtentAnalysis(StorageBufferAddr buffer_, const std::array<u32, 3>& workgroup_)
         : buffer{buffer_}, workgroup{workgroup_} {}
 
-    /// Extent of one store, merged into `extent`
-    void AddStore(IR::Inst& inst, StorageWriteExtent& extent) {
+    /// Extent of one access, merged into `extent`
+    void AddAccess(IR::Inst& inst, StorageWriteExtent& extent) {
         const std::optional<StorageWriteExtent> store{StoreExtent(inst)};
         if (!store) {
             extent = StorageWriteExtent{};
@@ -1579,15 +1598,13 @@ private:
         if (!low || low->base != 1 || guard_failed) {
             return std::nullopt;
         }
-        // Below zero, invocation 0's offset wraps modulo 2^32 (see IdBound).
-        const s64 start{low->c + addr->imm_offset};
-        const s64 end{start + StoreSize(inst.GetOpcode())};
-        if (start < 0 || end > s64{0xffffffff}) {
+        const s64 end{low->c + addr->imm_offset + AccessSize(inst.GetOpcode())};
+        if (end > s64{0xffffffff}) {
             return std::nullopt;
         }
         StorageWriteExtent result{
             .bounded = true,
-            .const_end = static_cast<u32>(end),
+            .const_end = static_cast<u32>((std::max)(end, s64{0})),
         };
         for (size_t i = 0; i < 3; ++i) {
             if (low->coef[i] >= COEF_LIMIT || low->coef[i + 3] >= COEF_LIMIT) {
@@ -1629,57 +1646,39 @@ private:
         return IdBound{.c = value};
     }
 
-    static std::optional<IdBound> Inexact(IdBound value) {
-        value.exact = false;
-        return value;
-    }
-
     static std::optional<IdBound> Sum(const IdBound& lhs, const IdBound& rhs) {
-        // An upper bound minus a constant: the value itself can be below the constant
-        if ((!lhs.exact && rhs.c < 0) || (!rhs.exact && lhs.c < 0)) {
-            return std::nullopt;
-        }
-        IdBound result{
-            .c = lhs.c + rhs.c, .base = lhs.base + rhs.base, .exact = lhs.exact && rhs.exact};
+        IdBound result{.c = lhs.c + rhs.c, .base = lhs.base + rhs.base};
         for (size_t i = 0; i < result.coef.size(); ++i) {
             result.coef[i] = lhs.coef[i] + rhs.coef[i];
         }
         return Checked(result);
     }
 
-    /// Component-wise maximum: a bound of either value (ids are non-negative). A value that can
-    /// wrap below zero is larger than any bound of the other.
+    /// Component-wise maximum: a bound of either value (ids are non-negative)
     static std::optional<IdBound> Max(const IdBound& lhs, const IdBound& rhs) {
-        if (lhs.base != rhs.base || lhs.c < 0 || rhs.c < 0) {
+        if (lhs.base != rhs.base) {
             return std::nullopt;
         }
-        IdBound result{.c = (std::max)(lhs.c, rhs.c), .base = lhs.base, .exact = false};
+        IdBound result{.c = (std::max)(lhs.c, rhs.c), .base = lhs.base};
         for (size_t i = 0; i < result.coef.size(); ++i) {
             result.coef[i] = (std::max)(lhs.coef[i], rhs.coef[i]);
         }
         return result;
     }
 
-    /// value * factor, where an inexact factor only bounds the multiplier: then the value must not
-    /// wrap below zero
-    static std::optional<IdBound> Scale(const IdBound& value, u64 factor,
-                                        bool exact_factor = true) {
-        if (value.base != 0 || factor >= COEF_LIMIT || (!exact_factor && value.c < 0)) {
+    static std::optional<IdBound> Scale(const IdBound& value, u64 factor) {
+        if (value.base != 0 || factor >= COEF_LIMIT) {
             return std::nullopt;
         }
-        // Before multiplying: |c| is at most 2^40 and the factor below 2^32, so the product can
-        // overflow 64 bits (either sign)
-        const u64 magnitude{static_cast<u64>(value.c < 0 ? -value.c : value.c)};
-        if (magnitude != 0 && factor > static_cast<u64>(CONST_LIMIT) / magnitude) {
-            return std::nullopt;
-        }
-        IdBound result{.c = value.c * static_cast<s64>(factor),
-                       .exact = value.exact && exact_factor};
+        IdBound result{.c = value.c * static_cast<s64>(factor)};
         for (size_t i = 0; i < result.coef.size(); ++i) {
             if (value.coef[i] != 0 && factor > (COEF_LIMIT - 1) / value.coef[i]) {
                 return std::nullopt;
             }
             result.coef[i] = value.coef[i] * factor;
+        }
+        if (value.c > 0 && factor > static_cast<u64>(CONST_LIMIT / value.c)) {
+            return std::nullopt;
         }
         return Checked(result);
     }
@@ -1690,7 +1689,7 @@ private:
             return std::nullopt;
         }
         const auto up = [shift](u64 x) { return (x + (u64{1} << shift) - 1) >> shift; };
-        IdBound result{.c = static_cast<s64>(up(static_cast<u64>(value.c))), .exact = false};
+        IdBound result{.c = static_cast<s64>(up(static_cast<u64>(value.c)))};
         for (size_t i = 0; i < result.coef.size(); ++i) {
             result.coef[i] = up(value.coef[i]);
         }
@@ -1746,7 +1745,7 @@ private:
         }
         const std::optional<IdBound> source{Evaluate(inst.Arg(0), depth + 1)};
         const std::optional<IdBound> field_max{
-            count <= 24 ? Inexact(IdBound{.c = (s64{1} << count) - 1}) : std::nullopt};
+            count <= 24 ? Constant((s64{1} << count) - 1) : std::nullopt};
         if (!source || source->base != 0 || source->c < 0) {
             return field_max;
         }
@@ -1757,7 +1756,7 @@ private:
         }
         if (offset == 0) {
             // A low field is at most the whole value
-            return count == 32 ? source : Inexact(*source);
+            return source;
         }
         if (offset >= 16) {
             // The high half of a lowered 32-bit multiplication's operand: zero while the operand
@@ -1825,8 +1824,7 @@ private:
         case IR::Opcode::ISub32: {
             const auto lhs{arg(0)};
             const auto rhs{lhs ? arg(1) : std::nullopt};
-            // Subtracting a bound of the subtrahend bounds nothing
-            if (!lhs || !rhs || !rhs->IsConstant() || !rhs->exact) {
+            if (!lhs || !rhs || !rhs->IsConstant()) {
                 return std::nullopt;
             }
             return Sum(*lhs, IdBound{.c = -rhs->c});
@@ -1838,10 +1836,10 @@ private:
                 return std::nullopt;
             }
             if (rhs->IsConstant() && rhs->c >= 0) {
-                return Scale(*lhs, static_cast<u64>(rhs->c), rhs->exact);
+                return Scale(*lhs, static_cast<u64>(rhs->c));
             }
             if (lhs->IsConstant() && lhs->c >= 0) {
-                return Scale(*rhs, static_cast<u64>(lhs->c), lhs->exact);
+                return Scale(*rhs, static_cast<u64>(lhs->c));
             }
             return std::nullopt;
         }
@@ -1868,12 +1866,12 @@ private:
             }};
             for (const auto* side : {&rhs, &lhs}) {
                 if (usable(*side) && (*side)->IsConstant() && (*side)->c <= 0xffffff) {
-                    return Inexact(**side);
+                    return *side;
                 }
             }
             for (const auto* side : {&lhs, &rhs}) {
                 if (usable(*side)) {
-                    return Inexact(**side);
+                    return *side;
                 }
             }
             return std::nullopt;
@@ -1887,15 +1885,14 @@ private:
             if (!lhs || !rhs || lhs->base != 0 || rhs->base != 0 || lhs->c < 0 || rhs->c < 0) {
                 return std::nullopt;
             }
-            const auto sum{Sum(*lhs, *rhs)};
-            return sum ? Inexact(*sum) : std::nullopt;
+            return Sum(*lhs, *rhs);
         }
         case IR::Opcode::UMin32: {
             const auto lhs{arg(0)};
             const auto rhs{arg(1)};
             for (const auto* side : {&rhs, &lhs}) {
                 if (*side && (*side)->base == 0 && (*side)->c >= 0) {
-                    return Inexact(**side);
+                    return *side;
                 }
             }
             return std::nullopt;
@@ -1915,8 +1912,7 @@ private:
                 return std::nullopt;
             }
             const auto shifted{Scale(*insert, u64{1} << inst.Arg(2).U32())};
-            const auto sum{shifted ? Sum(*base_value, *shifted) : std::nullopt};
-            return sum ? Inexact(*sum) : std::nullopt;
+            return shifted ? Sum(*base_value, *shifted) : std::nullopt;
         }
         case IR::Opcode::SelectU32: {
             const auto lhs{arg(1)};
@@ -2088,12 +2084,7 @@ void GlobalMemoryToStorageBufferPass(Environment& env, IR::Program& program,
     TrackingConditions conditions{program};
     StorageInfo info;
     // Without 64-bit integers the backend cannot route global accesses among bound buffers.
-    // EDEN_DJIPI_NO_410=1 (A/B): keep paired pointers only, as before #410.
-    static const bool no_410 = [] {
-        const char* value = std::getenv("EDEN_DJIPI_NO_410");
-        return value != nullptr && value[0] == '1';
-    }();
-    info.bind_competing_loaded = host_info.support_int64 && !no_410;
+    info.bind_competing_loaded = host_info.support_int64;
     info.iterator_words = CollectIteratorWords(program);
     info.atomic_pointers = CollectAtomicPointers(program);
     const auto collect = [&] {
@@ -2105,6 +2096,7 @@ void GlobalMemoryToStorageBufferPass(Environment& env, IR::Program& program,
                 conditions.current = block;
                 const bool bound{CollectStorageBuffers(*block, inst, info, env, conditions)};
                 info.untracked_writes |= !bound && IsGlobalMemoryWrite(inst);
+                info.untracked_reads |= !bound && !IsGlobalMemoryWrite(inst);
             }
         }
     };
@@ -2141,11 +2133,9 @@ void GlobalMemoryToStorageBufferPass(Environment& env, IR::Program& program,
                                       info.set.size(), max_ssbos);
     }
     program.info.native_global_bounds |= info.native_runtime_bounds;
-    // Store extents, before the accesses are rebased (the analysis reads the guest addresses).
-    // None while a store stays global: the backend routes it to the descriptor whose pointer is the
-    // closest one at or below the address, which need not be one of the store's candidates.
+    // Store extents, before the accesses are rebased (the analysis reads the guest addresses)
     std::map<StorageBufferAddr, StorageWriteExtent> extents;
-    if (!info.untracked_writes && info.unbounded_writes.empty()) {
+    if (!info.untracked_writes) {
         std::map<StorageBufferAddr, StoreExtentAnalysis> analyses;
         for (const StorageInst& storage_inst : info.to_replace) {
             if (!IsGlobalMemoryWrite(*storage_inst.inst) ||
@@ -2162,8 +2152,41 @@ void GlobalMemoryToStorageBufferPass(Environment& env, IR::Program& program,
                 // An empty bounded extent, widened by every store
                 extents.emplace(storage_inst.storage_buffer, StorageWriteExtent{.bounded = true});
             }
-            analysis->second.AddStore(*storage_inst.inst, extents[storage_inst.storage_buffer]);
+            analysis->second.AddAccess(*storage_inst.inst, extents[storage_inst.storage_buffer]);
         }
+    }
+    // Read extents of the loads and atomics. An access left global is routed by address at run
+    // time into any bound buffer at any offset, so with one left no read extent is known.
+    const bool reads_known{!info.untracked_reads && !info.untracked_writes &&
+                           !info.native_runtime_bounds};
+    std::map<StorageBufferAddr, StorageWriteExtent> read_extents;
+    if (reads_known) {
+        // A buffer with no loads or atomics reads nothing: empty and proven
+        for (const StorageBufferAddr& storage_buffer : info.set) {
+            read_extents.emplace(storage_buffer, StorageWriteExtent{.bounded = true});
+        }
+        // Their own analyses: the guard state must not mix with the stores'
+        std::map<StorageBufferAddr, StoreExtentAnalysis> analyses;
+        for (const StorageInst& storage_inst : info.to_replace) {
+            if (!IsGlobalMemoryRead(*storage_inst.inst)) {
+                continue;
+            }
+            auto analysis{analyses.find(storage_inst.storage_buffer)};
+            if (analysis == analyses.end()) {
+                analysis = analyses
+                               .emplace(storage_inst.storage_buffer,
+                                        StoreExtentAnalysis{storage_inst.storage_buffer,
+                                                            program.workgroup_size})
+                               .first;
+            }
+            analysis->second.AddAccess(*storage_inst.inst,
+                                       read_extents[storage_inst.storage_buffer]);
+        }
+    }
+    for (const StorageBufferAddr& storage_buffer : info.set) {
+        const auto read_extent{read_extents.find(storage_buffer)};
+        program.info.storage_read_extents.push_back(
+            read_extent != read_extents.end() ? read_extent->second : StorageWriteExtent{});
     }
     for (const StorageBufferAddr& storage_buffer : info.set) {
         const bool is_written{info.writes.contains(storage_buffer)};
@@ -2203,15 +2226,30 @@ size_t StorageBufferLimit(const HostTranslateInfo& host_info) {
 
 void JoinStorageInfo(Info& base, Info& source, size_t limit) {
     base.requires_coherent_global_memory |= source.requires_coherent_global_memory;
+    // An access left global in either half is routed by address into any buffer of the joined
+    // program: then no read extent is known.
+    const bool reads_known{
+        !base.uses_global_memory && !source.uses_global_memory && !base.native_global_bounds &&
+        !source.native_global_bounds &&
+        base.storage_read_extents.size() == base.storage_buffers_descriptors.size() &&
+        source.storage_read_extents.size() == source.storage_buffers_descriptors.size()};
     base.native_global_bounds |= source.native_global_bounds;
     auto& descriptors = base.storage_buffers_descriptors;
-    for (auto& desc : source.storage_buffers_descriptors) {
+    auto& read_extents = base.storage_read_extents;
+    for (size_t index = 0; index < source.storage_buffers_descriptors.size(); ++index) {
+        auto& desc{source.storage_buffers_descriptors[index]};
+        const StorageWriteExtent source_read{reads_known ? source.storage_read_extents[index]
+                                                         : StorageWriteExtent{}};
         auto it{std::ranges::find_if(descriptors, [&desc](const auto& existing) {
             return desc.cbuf_index == existing.cbuf_index &&
                    desc.cbuf_offset == existing.cbuf_offset && desc.count == existing.count &&
                    desc.indirect_offset == existing.indirect_offset;
         })};
         if (it != descriptors.end()) {
+            if (reads_known) {
+                const auto existing{static_cast<size_t>(std::distance(descriptors.begin(), it))};
+                MergeStorageWriteExtent(read_extents[existing], source_read);
+            }
             if (desc.is_written) {
                 if (it->is_written) {
                     MergeStorageWriteExtent(it->write_extent, desc.write_extent);
@@ -2227,6 +2265,12 @@ void JoinStorageInfo(Info& base, Info& source, size_t limit) {
                                           descriptors.size() + 1, limit);
         }
         descriptors.push_back(desc);
+        if (reads_known) {
+            read_extents.push_back(source_read);
+        }
+    }
+    if (!reads_known) {
+        read_extents.assign(descriptors.size(), StorageWriteExtent{});
     }
 }
 

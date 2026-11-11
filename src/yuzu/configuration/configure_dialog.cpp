@@ -5,6 +5,9 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <memory>
+#include <QBoxLayout>
+#include <QLabel>
+#include <QPushButton>
 #include "common/logging.h"
 #include "common/settings.h"
 #include "common/settings_enums.h"
@@ -31,6 +34,7 @@
 #include "yuzu/configuration/configure_ui.h"
 #include "yuzu/configuration/configure_web.h"
 #include "yuzu/hotkeys.h"
+#include "yuzu/fritchii/fritchii_ui.h"
 
 ConfigureDialog::ConfigureDialog(QWidget* parent, HotkeyRegistry& registry_,
                                  InputCommon::InputSubsystem* input_subsystem,
@@ -80,8 +84,8 @@ ConfigureDialog::ConfigureDialog(QWidget* parent, HotkeyRegistry& registry_,
     ui->tabWidget->addTab(profile_tab.get(), tr("Profiles"));
     ui->tabWidget->addTab(system_tab.get(), tr("System"));
     ui->tabWidget->addTab(ui_tab.get(), tr("Game List"));
-
-    // Not in any tab (no multiplayer), but parented to the dialog: hide it, or it shows through.
+    // OOT Remake: no multiplayer or web services. Parented to the dialog: hide them, or they
+    // show through.
     network_tab->hide();
     web_tab->hide();
 
@@ -114,6 +118,43 @@ ConfigureDialog::ConfigureDialog(QWidget* parent, HotkeyRegistry& registry_,
 
     adjustSize();
     ui->selectorList->setCurrentRow(0);
+    if (FritchiiUi::Enabled()) {
+        // After the first group is shown: its pages sit in scroll areas by then, so the window
+        // can take a normal size.
+        setWindowTitle(tr("Settings"));
+        ui->label->setText(tr("Some settings can't change while a game runs."));
+        ui->label->setVisible(system.IsPoweredOn());
+        ui->selectorList->setFixedWidth(180);
+        layout()->setSizeConstraint(QLayout::SetNoConstraint);
+        setMinimumSize(640, 460);
+        resize(940, 680);
+
+        // OoT's own values (Configure Game) beat these, the usual "my settings didn't apply".
+        if (const QStringList overrides = FritchiiUi::OcarinaGameOverrides();
+            !overrides.isEmpty()) {
+            auto* const banner = new QWidget(this);
+            auto* const row = new QHBoxLayout(banner);
+            row->setContentsMargins(0, 0, 0, 8);
+            auto* const text = new QLabel(
+                tr("Ocarina of Time keeps its own value for %n of these settings, so changes "
+                   "here don't reach it.",
+                   nullptr, static_cast<int>(overrides.size())),
+                banner);
+            text->setWordWrap(true);
+            text->setToolTip(overrides.join(QLatin1Char('\n')));
+            auto* const use_global = new QPushButton(tr("Use these for OoT too"), banner);
+            row->addWidget(text, 1);
+            row->addWidget(use_global);
+            if (auto* const main = qobject_cast<QBoxLayout*>(layout())) {
+                main->insertWidget(0, banner);
+            }
+            connect(use_global, &QPushButton::clicked, this, [banner] {
+                if (FritchiiUi::ClearOcarinaGameOverrides()) {
+                    banner->hide();
+                }
+            });
+        }
+    }
 
     // Selects the leftmost button on the bottom bar (Cancel as of writing)
     ui->buttonBox->setFocus();
@@ -186,10 +227,28 @@ void ConfigureDialog::PopulateSelectionList() {
          {tr("Controls"), input_tab->GetSubTabs()}},
     };
 
+    // Fritchii: everyday settings first, everything a player rarely needs under Advanced.
+    const std::array<std::pair<QString, QList<QWidget*>>, 6> fritchii_items{
+        {{tr("General"), {general_tab.get(), ui_tab.get(), hotkeys_tab.get()}},
+         {tr("Graphics"),
+          {graphics_tab.get(), graphics_advanced_tab.get(), graphics_extensions_tab.get()}},
+         {tr("Controls"), input_tab->GetSubTabs()},
+         {tr("Audio"), {audio_tab.get()}},
+         {tr("System"), {system_tab.get(), profile_tab.get()}},
+         {tr("Advanced"),
+          {cpu_tab.get(), network_tab.get(), filesystem_tab.get(), applets_tab.get(),
+           web_tab.get(), debug_tab_tab.get()}}},
+    };
+    if (FritchiiUi::Enabled()) {
+        ui_tab->setAccessibleName(tr("Interface"));
+        hotkeys_tab->setAccessibleName(tr("Shortcuts"));
+        profile_tab->setAccessibleName(tr("Users"));
+    }
+
     [[maybe_unused]] const QSignalBlocker blocker(ui->selectorList);
 
     ui->selectorList->clear();
-    for (const auto& entry : items) {
+    for (const auto& entry : FritchiiUi::Enabled() ? fritchii_items : items) {
         auto* const item = new QListWidgetItem(entry.first);
         item->setData(Qt::UserRole, QVariant::fromValue(entry.second));
 
@@ -221,6 +280,6 @@ void ConfigureDialog::UpdateVisibleTabs() {
 
     for (auto* const tab : tabs) {
         LOG_DEBUG(Frontend, "{}", tab->accessibleName().toStdString());
-        ui->tabWidget->addTab(tab, tab->accessibleName());
+        ui->tabWidget->addTab(FritchiiUi::SettingsPage(tab), tab->accessibleName());
     }
 }

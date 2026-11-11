@@ -1050,48 +1050,34 @@ function(AddCIPackage)
         set(sha512sum_file
             "${CMAKE_CURRENT_BINARY_DIR}/.cpmutil_${ARTIFACT}_sha512sum")
 
-        # The checksum is kept next to the CPM source cache, so a cached package does not need
-        # GitHub's release downloads (they time out now and then) to configure again.
-        set(sha512sum_hash "")
-        set(sha512sum_cached "")
-        if (DEFINED CPM_SOURCE_CACHE AND NOT "${CPM_SOURCE_CACHE}" STREQUAL "")
-            set(sha512sum_cached "${CPM_SOURCE_CACHE}/.cpmutil-sha512sum/${ARTIFACT}.sha512sum")
-        endif()
-        if (sha512sum_cached AND EXISTS "${sha512sum_cached}")
-            file(READ "${sha512sum_cached}" sha512sum_hash)
-        else()
-            set(sha512sum_error 1)
-            foreach(sha512sum_attempt RANGE 1 4)
-                file(DOWNLOAD "${sha512sum_url}" "${sha512sum_file}"
-                    STATUS sha512sum_status)
-                list(GET sha512sum_status 0 sha512sum_error)
-                if (NOT sha512sum_error)
-                    break()
-                endif()
-                execute_process(COMMAND ${CMAKE_COMMAND} -E sleep 10)
-            endforeach()
-            if (NOT sha512sum_error)
-                file(READ "${sha512sum_file}" sha512sum_hash)
-                file(REMOVE "${sha512sum_file}")
-                if (sha512sum_cached)
-                    file(WRITE "${sha512sum_cached}" "${sha512sum_hash}")
-                endif()
-            elseif (sha512sum_cached AND EXISTS "${CPM_SOURCE_CACHE}")
-                # Without its checksum a package already in the source cache is still used;
-                # one that has to be downloaded fails at its own download.
-                message(WARNING "[CPMUtil] Failed to download sha512sum for ${ARTIFACT_NAME} "
-                    "from ${sha512sum_url}; using the source cache without it")
+        file(DOWNLOAD "${sha512sum_url}" "${sha512sum_file}"
+            STATUS sha512sum_status)
+        list(GET sha512sum_status 0 sha512sum_error)
+
+        # The checksum only verifies a download. When GitHub can't serve it (an outage) but this
+        # exact version is already unpacked in the source cache, nothing is downloaded: go on
+        # without it. A package that isn't cached still needs the checksum.
+        string(TOLOWER "${ARTIFACT_PACKAGE}" cached_package)
+        set(cached_dir "${CPM_SOURCE_CACHE}/${cached_package}/${ARTIFACT_VERSION}-${pkgname}")
+        set(hash_args)
+        if(sha512sum_error)
+            file(REMOVE "${sha512sum_file}")
+            if(CPM_SOURCE_CACHE AND IS_DIRECTORY "${cached_dir}")
+                message(WARNING "[CPMUtil] Could not download the sha512sum for "
+                    "${ARTIFACT_NAME} (${sha512sum_url}); using the cached ${cached_dir}")
+                # fetch_package returns before the hash is used when the cache is valid; if it
+                # were not, a download would fail its check against this placeholder.
+                set(hash_args HASH "unverified-cached-copy")
             else()
                 message(FATAL_ERROR "[CPMUtil] Failed to download sha512sum "
                     "for ${ARTIFACT_NAME} from ${sha512sum_url}")
             endif()
+        else()
+            file(READ "${sha512sum_file}" sha512sum_hash)
+            string(STRIP "${sha512sum_hash}" sha512sum_hash)
+            file(REMOVE "${sha512sum_file}")
+            set(hash_args HASH ${sha512sum_hash})
         endif()
-        string(STRIP "${sha512sum_hash}" sha512sum_hash)
-        if (sha512sum_hash STREQUAL "")
-            # Only checked when the package has to be downloaded (fetch_package).
-            set(sha512sum_hash "unavailable")
-        endif()
-        set(sha512sum_hash_args HASH ${sha512sum_hash})
 
         AddPackage(
             NAME ${ARTIFACT_PACKAGE}
@@ -1099,7 +1085,7 @@ function(AddCIPackage)
             VERSION ${ARTIFACT_VERSION}
             ARTIFACT ${ARTIFACT}
             CUSTOM_KEY "${ARTIFACT_VERSION}-${pkgname}"
-            ${sha512sum_hash_args}
+            ${hash_args}
             FORCE_BUNDLED_PACKAGE ON
             ${EXTRA_ARGS})
 

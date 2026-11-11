@@ -15,6 +15,9 @@
 #include "common/bit_util.h"
 #include "common/common_types.h"
 #include "common/literals.h"
+#include "video_core/churn_counters.h"
+#include "video_core/nx2_debug_control.h"
+#include "common/logging.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_staging_buffer_pool.h"
 #include "video_core/vulkan_common/vulkan_device.h"
@@ -264,6 +267,8 @@ StagingBufferRef StagingBufferPool::CreateStagingBuffer(size_t size, MemoryUsage
                     "staging buffers and retrying", buffer_ci.size >> 20, e.what(), freed);
         buffer = memory_allocator.CreateBuffer(buffer_ci, usage);
     }
+    VideoCommon::Churn::Add(VideoCommon::Churn::StagingBuffers);
+    VideoCommon::Churn::Add(VideoCommon::Churn::StagingBytes, buffer_ci.size);
     if (device.HasDebuggingToolAttached()) {
         ++buffer_index;
         buffer.SetObjectNameEXT(fmt::format("Staging Buffer {}", buffer_index).c_str());
@@ -300,6 +305,17 @@ StagingBufferPool::StagingBuffersCache& StagingBufferPool::GetCache(MemoryUsage 
     }
 }
 
+u64 StagingBufferPool::CachedBytes(MemoryUsage usage) {
+    u64 bytes{};
+    const StagingBuffersCache& cache = GetCache(usage);
+    for (size_t level = 0; level < NUM_LEVELS; ++level) {
+        if (!cache[level].entries.empty()) {
+            bytes += u64{cache[level].entries.size()} << level;
+        }
+    }
+    return bytes;
+}
+
 void StagingBufferPool::ReleaseCache(MemoryUsage usage) {
     ReleaseLevel(GetCache(usage), current_delete_level);
 }
@@ -310,13 +326,14 @@ void StagingBufferPool::ReleaseLevel(StagingBuffersCache& cache, size_t log2) {
     auto& entries = staging.entries;
     const size_t old_size = entries.size();
 
-    // Keep two idle upload buffers per level up to 32 MiB (under 128 MiB in all). Each level is
-    // swept every 64 frames, so after a pause each upload over 8 MiB (past the stream buffer's
-    // regions) got a new dedicated allocation, written to for the first time (16 MiB on an
-    // RTX 4080, idle system: 0.4 ms to create, 1.2 ms more for the first write).
+    // EDEN_NX2_EXP8 bit 1: keep two idle upload buffers per level up to 32 MiB (under 128 MiB in
+    // all). Each level is swept every 64 frames, so after a pause each upload over 8 MiB (past
+    // the stream buffer's regions) got a new dedicated allocation, written to for the first time
+    // (16 MiB on an RTX 4080, idle system: 0.4 ms to create, 1.2 ms more for the first write).
     constexpr size_t KeepMaxLog2 = 25;
     constexpr size_t KeepPerLevel = 2;
-    if (&cache == &upload_cache && log2 <= KeepMaxLog2) {
+    if (&cache == &upload_cache && log2 <= KeepMaxLog2 &&
+        (VideoCore::Nx2Debug::Experiment(8) & 1) != 0) {
         size_t idle = 0;
         std::erase_if(entries, [this, &idle](const StagingBuffer& entry) {
             return scheduler.IsFree(entry.tick) && ++idle > KeepPerLevel;

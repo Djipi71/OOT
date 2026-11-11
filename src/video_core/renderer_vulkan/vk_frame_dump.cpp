@@ -7,6 +7,7 @@
 #include <cstring>
 #include <limits>
 #include <string_view>
+#include <utility>
 
 #include <fmt/format.h>
 
@@ -17,6 +18,7 @@
 #include "common/stb.h"
 #include "common/zstd_compression.h"
 #include "video_core/renderer_vulkan/maxwell_to_vk.h"
+#include "video_core/nx2_debug_control.h"
 #include "video_core/renderer_vulkan/vk_frame_dump.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_texture_cache.h"
@@ -250,6 +252,9 @@ FrameDump::FrameDump(const Device& device_, MemoryAllocator& memory_allocator_,
     start = std::chrono::steady_clock::now();
     const char* const at = std::getenv("EDEN_NX2_FRAME_DUMP_AT");
     const std::string_view value = at ? at : "60";
+    if (const char* const pair_value = std::getenv("EDEN_NX2_FRAME_DUMP_PAIR")) {
+        pair = *pair_value != '\0' && *pair_value != '0';
+    }
     if (value == "file") {
         // Captures once <dir>/capture.now exists, so a frame can be picked while playing.
         trigger_file = directory / "capture.now";
@@ -512,6 +517,23 @@ bool FrameDump::NoteBuffers(bool compute, std::span<const u64> shader_hashes,
             continue;
         }
         recorded |= RecordBuffer(buffer.host, buffer.host_offset, buffer.size, std::move(tags));
+    }
+    for (const BoundBuffer& buffer : buffers) {
+        if (!buffer.also_host || buffer.host == VK_NULL_HANDLE) {
+            continue;
+        }
+        const size_t program = compute ? 0 : buffer.stage + 1;
+        const u64 shader = program < shader_hashes.size() ? shader_hashes[program] : 0;
+        const std::string owner =
+            compute ? fmt::format(R"("dispatch":{},"after_draws":{})", dispatches, draws)
+                    : fmt::format(R"("pass":{},"draw":{})", pass_index, draws - 1);
+        recorded |= RecordBuffer(
+            buffer.host, buffer.host_offset, buffer.size,
+            fmt::format(
+                R"("kind":"buffer",{},"stage":{},"shader":"{:016x}","type":"{}","index":{},"written":{},"gpu_addr":"{:#x}","device_addr":"{:#x}","bound_size":{},"size":{},"gpu_modified":{},"source":"host_copy")",
+                owner, buffer.stage, shader, buffer.storage ? "storage" : "uniform", buffer.index,
+                buffer.written, buffer.gpu_addr, buffer.device_addr, buffer.bound_size, buffer.size,
+                buffer.gpu_modified));
     }
     return recorded;
 }
@@ -894,17 +916,38 @@ void FrameDump::WriteFile(const std::string& name, std::span<const u8> data) {
     written_bytes += data.size();
 }
 
-void FrameDump::Rearm() {
-    // File trigger: each new capture.now takes another capture, into capture-2, capture-3...
+bool FrameDump::RequestNow(u64 id, const std::filesystem::path& dir, bool buffers, bool host) {
+    if (capturing || request_now) {
+        return false;
+    }
+    if (!enabled) {
+        // Armed mid-game: no time, frame or file trigger of its own.
+        enabled = true;
+        size_cap = SIZE_CAP;
+        start = std::chrono::steady_clock::now();
+        trigger_seconds = std::numeric_limits<double>::infinity();
+    }
+    done = false;
+    directory = dir;
+    sampled = buffers;
+    host_copies = host;
+    request_id = id;
+    request_now = true;
+    LOG_INFO(Render_Vulkan, "Frame dump requested mid-game: capturing the next frame into {}",
+             directory.string());
+    return true;
+}
+
+void FrameDump::ResetAfterCapture() {
     {
         std::scoped_lock lock{queue_mutex};
         stop_writer = true;
     }
     queue_ready.notify_one();
-    writer.join();
+    if (writer.joinable()) {
+        writer.join();
+    }
     stop_writer = false;
-    std::error_code error;
-    std::filesystem::remove(trigger_file, error);
     probes.clear();
     pending_bytes = recorded_bytes = written_bytes = 0;
     sequence = images = 0;
@@ -919,6 +962,13 @@ void FrameDump::Rearm() {
     seen_buffers.clear();
     written_buffers.clear();
     pass_index = pass_first_draw = draws = dispatches = 0;
+}
+
+void FrameDump::Rearm() {
+    // File trigger: each new capture.now takes another capture, into capture-2, capture-3...
+    ResetAfterCapture();
+    std::error_code error;
+    std::filesystem::remove(trigger_file, error);
     directory = base_directory / fmt::format("capture-{}", ++captures + 1);
     LOG_INFO(Render_Vulkan, "Frame dump re-armed: the next capture.now captures into {}",
              directory.string());
@@ -959,17 +1009,32 @@ void FrameDump::TickFrame() {
                  .summary = true,
                  .truncated = truncated});
         capturing = false;
+        if (request_id != 0) {
+            // capture_frame: answer once every file is on disk; a boot trigger stays as it was.
+            const u64 id = std::exchange(request_id, 0);
+            host_copies = false;
+            ResetAfterCapture();
+            if (trigger_file.empty() && base_directory.empty()) {
+                done = true;
+            }
+            VideoCore::Nx2Debug::FinishCapture(id, {});
+            return;
+        }
         if (trigger_file.empty()) {
             done = true;
         } else {
             Rearm();
+            // The pair's second capture starts right away, so it records the next frame.
+            pair_next = pair && !std::exchange(pair_next, false);
         }
-        return;
+        if (!pair_next) {
+            return;
+        }
     }
     const double elapsed =
         std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
     std::error_code error;
-    if (frame < trigger_frame && elapsed < trigger_seconds &&
+    if (!request_now && frame < trigger_frame && elapsed < trigger_seconds && !pair_next &&
         (trigger_file.empty() || frame % 30 != 0 ||
          !std::filesystem::exists(trigger_file, error))) {
         return;
@@ -979,6 +1044,11 @@ void FrameDump::TickFrame() {
     if (!manifest) {
         LOG_ERROR(Render_Vulkan, "Frame dump: cannot write {}", directory.string());
         done = true;
+        if (request_id != 0) {
+            request_now = false;
+            VideoCore::Nx2Debug::FinishCapture(std::exchange(request_id, 0),
+                                               {.error = "cannot write the capture directory"});
+        }
         return;
     }
     manifest << fmt::format(R"({{"kind":"frame","frame":{},"seconds":{:.3f}}})", frame, elapsed)
@@ -1009,6 +1079,7 @@ void FrameDump::TickFrame() {
         });
     }
     capturing = true;
+    request_now = false;
     LOG_INFO(Render_Vulkan, "Frame dump: capturing frame {} ({:.1f} s after boot) into {}", frame,
              elapsed, directory.string());
 }

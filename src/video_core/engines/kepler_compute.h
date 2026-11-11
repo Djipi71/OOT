@@ -9,6 +9,7 @@
 #include <array>
 #include <atomic>
 #include <cstddef>
+#include <cstdlib>
 #include <memory>
 #include <optional>
 #include <span>
@@ -33,6 +34,9 @@ class System;
 namespace VideoCommon {
 class GpuSplit;
 }
+namespace VideoCommon::QmdPrediction {
+struct Record;
+}
 
 namespace Tegra {
 class MemoryManager;
@@ -43,6 +47,13 @@ class RasterizerInterface;
 }
 
 namespace Tegra::Engines {
+
+/// EXP13=2-4: bytes another engine's front knows (a 3D inline upload) land at GPU [address,
+/// address + size) of `memory` when the back runs the work that ends at ring `position`, written
+/// with write-stamp tag `tag`: the QMD copy's inline QMD overlays and upload shadow blocks that
+/// still hold those bytes take them, as compute inline uploads patch them.
+void Nx2PatchQmdCopy(VideoCommon::GpuSplit& split, const MemoryManager& memory, GPUVAddr address,
+                     const u8* data, u64 size, u64 position, u64 tag);
 
 /// Draws left to trace after an upscale fallback (debug aid).
 extern std::atomic<u32> g_nx2_trace_draws_after_upscale;
@@ -275,7 +286,6 @@ public:
 private:
     struct FrontState;
     FrontState& Front(VideoCommon::GpuSplit& split);
-    void ReleaseFront();
     void FrontApply(FrontState& state, u32 method, u32 argument);
     MacroEngine& FrontMacroEngine(FrontState& state);
     std::span<u32> FrontMacroPositions(FrontState& state);
@@ -289,6 +299,29 @@ private:
     VideoCommon::SplitWriteTracker::Effect FrontEffect(u32 method) const;
     /// After sending it: the memory it writes, for the front's reads.
     void FrontNoteWrites(VideoCommon::GpuSplit& split, FrontState& state, u32 method);
+    /// After sending it: what it may write as compute work, for the front's macro memory reads
+    /// (GpuSplit::NoteWriterRange, NoteUnboundedWriter, NoteDispatchWriter).
+    void FrontNoteWriter(VideoCommon::GpuSplit& split, FrontState& state, u32 method, u32 argument);
+    /// EXP13: predicts the releases of the QMD a launch just sent signals (nx2_qmd_prediction.h).
+    void FrontPredictQmd(VideoCommon::GpuSplit& split, const FrontState& state, u32 method,
+                         u32 argument) const;
+    /// EXP13=2: feeds the front's QMD scheduler copy the signal just sent (0xaf, 0xb0, 0x107).
+    void FrontMirrorQmd(VideoCommon::GpuSplit& split, const FrontState& state, u32 method,
+                        u32 argument) const;
+    /// EXP13=2: runs the copy's scheduler for a signal of the QMD at `qmd_address`.
+    void FrontQmdSignal(VideoCommon::GpuSplit& split, GPUVAddr qmd_address, u32 argument) const;
+    /// EXP13=2: the QMD at `address` as the back will read it; `unknown` when the copy can't
+    /// tell (it resyncs then).
+    bool FrontReadQmd(VideoCommon::GpuSplit& split, u64 address,
+                      NativeQmdScheduler::Descriptor& descriptor, bool& unknown,
+                      VideoCommon::QmdPrediction::Record& info) const;
+    /// An exec_upload with `exec` was sent: the range its data writes.
+    void FrontNoteUpload(FrontState& state, u32 exec);
+    /// EXP13=2: data_upload words just sent: the inline QMD overlays they fall in take them.
+    void FrontPatchOverlays(VideoCommon::GpuSplit& split, FrontState& state, const u32* words,
+                            u32 count, u64 position) const;
+    /// EXP13=2: the data_upload words batched since (FrontState::upload_batch) to the copy.
+    void FrontFlushUploads(VideoCommon::GpuSplit& split, FrontState& state) const;
     std::unique_ptr<FrontState> front;
     bool front_macros{}; ///< The front owns the macro code and bindings (the back skips them)
 
@@ -343,7 +376,8 @@ private:
     /// Native dispatches left to skip while a retained network is being replaced (bounded, so a
     /// non-network pass cannot silence the engine forever).
     u32 network_skip_remaining{};
-    /// Set when the replacement copy fails, so the full network runs from then on.
+    /// Set when the replacement copy fails, so the full network runs from then on. Settings
+    /// oot_movie_upscale chooses the network itself (OotMovieNetworkChosen in the .cpp).
     bool native_upscale_disabled{};
 
     /// Motion vectors and depth of Fire Emblem: Fortune's Weave's DLSS evaluation, from its first

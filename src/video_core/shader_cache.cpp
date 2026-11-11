@@ -65,6 +65,16 @@ u64 VertexAttributeMaskOf(const Shader::Environment& env) {
     return VertexAttributeMask(input_generic);
 }
 
+u32 GenericReadMask(const Shader::ProgramHeader& sph) noexcept {
+    u32 mask = 0;
+    for (size_t index = 0; index < 32; ++index) {
+        if ((sph.vtg.imap_generic_vector[index >> 1] >> ((index % 2) * 4)) & 0xF) {
+            mask |= 1U << index;
+        }
+    }
+    return mask;
+}
+
 void ShaderCache::InvalidateRegion(VAddr addr, size_t size) {
     std::scoped_lock lock{invalidation_mutex};
     InvalidatePagesInRegion(addr, size);
@@ -355,16 +365,20 @@ void ShaderCache::RememberRejection(VAddr addr) {
         return;
     }
     rejected_native.emplace(addr, std::current_exception());
-    page_filter.Mark(addr, 1); // InnerInvalidation reaches InvalidatePagesInRegion for it
+    // InnerInvalidation only reaches InvalidateRegions on marked pages, and a rejection can
+    // outlive (or precede) the registration that marked its page.
+    page_filter.Mark(addr, 1);
     rejected_lowest.store((std::min)(rejected_lowest.load(std::memory_order_relaxed), addr),
                           std::memory_order_relaxed);
     rejected_highest.store((std::max)(rejected_highest.load(std::memory_order_relaxed), addr),
                            std::memory_order_relaxed);
 }
 
-void ShaderCache::GetGraphicsEnvironments(GraphicsEnvironments& result,
-                                          const std::array<u64, NUM_PROGRAMS>& unique_hashes) {
+size_t ShaderCache::GetGraphicsEnvironments(GraphicsEnvironments& result,
+                                            const std::array<u64, NUM_PROGRAMS>& unique_hashes,
+                                            bool snapshot) {
     size_t env_index{};
+    size_t snapshot_bytes{};
     const GPUVAddr base_addr{maxwell3d->regs.program_region.Address()};
     const bool native = maxwell3d->GetNativeMacroEngine().native_turing;
     for (size_t index = 0; index < NUM_PROGRAMS; ++index) {
@@ -381,8 +395,12 @@ void ShaderCache::GetGraphicsEnvironments(GraphicsEnvironments& result,
         env = GraphicsEnvironment{*maxwell3d, *gpu_memory, program, address, start_address,
                                   shader_infos[index]->lowered_native};
         env.SetCachedSize(shader_infos[index]->size_bytes);
+        if (snapshot) {
+            snapshot_bytes += env.TakeSnapshot();
+        }
         result.env_ptrs[env_index++] = &env;
     }
+    return snapshot_bytes;
 }
 
 ShaderInfo* ShaderCache::TryGet(VAddr addr) const {
@@ -529,6 +547,9 @@ const ShaderInfo* ShaderCache::MakeShaderInfo(GenericEnvironment& env, VAddr cpu
     }
     info->lowered_native = env.LoweredNative();
     info->vertex_attribute_mask = VertexAttributeMaskOf(env);
+    if (env.IsNativeProgram() && env.ShaderStage() == Shader::Stage::VertexB) {
+        info->generic_read_mask = GenericReadMask(env.SPH());
+    }
     const size_t size_bytes{env.SourceSizeBytes() ? env.SourceSizeBytes() : info->size_bytes};
     const ShaderInfo* const result{info.get()};
     Register(std::move(info), cpu_addr, size_bytes);

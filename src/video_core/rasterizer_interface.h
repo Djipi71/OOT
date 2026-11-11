@@ -44,14 +44,12 @@ enum class LoadCallbackStage {
     Prepare,
     Build,
     Complete,
-    /// The shader precache running before the game starts (programs built / total).
-    /// Last, so the values of the others stay as frontends that know only those expect.
-    Warm,
 };
 using DiskResourceLoadCallback = std::function<void(LoadCallbackStage, std::size_t, std::size_t)>;
 
-/// Set while the query cache signals the fence that writes a fence-flagged report, so the fence
-/// manager makes that fence even when it is empty (FenceManager::SignalFence).
+/// EXP33 (zortos293/Lichii#337): set while the query cache signals the fence that writes a
+/// fence-flagged report, so the fence manager makes that fence and delays its operation even when
+/// it is empty (FenceManager::SignalFence).
 inline thread_local bool g_signaling_query_report_fence = false;
 
 class RasterizerInterface {
@@ -125,6 +123,18 @@ public:
     virtual void FlushRegion(DAddr addr, u64 size,
                              VideoCommon::CacheType which = VideoCommon::CacheType::All) = 0;
 
+    /// EDEN_NX2_EXP49: FlushRegion for a guest CPU read of the region (GPU::OnCPURead), on the GPU
+    /// thread. A cache may submit its downloads without waiting for the host GPU, for FinishRead
+    /// to write.
+    virtual void FlushRegionForRead(DAddr addr, u64 size) {
+        FlushRegion(addr, size);
+    }
+
+    /// Writes to guest memory what FlushRegionForRead submitted over the region (and anything
+    /// submitted before it), waiting for the host GPU if it must. Any thread: the reading one
+    /// before it reads, and the GPU's side before it writes guest memory there.
+    virtual void FinishRead([[maybe_unused]] DAddr addr, [[maybe_unused]] u64 size) {}
+
     /// Switch 2, from the GPU thread's front: where a GPU-written command list's words are.
     enum class GpuWrittenList {
         Unknown, ///< Neither: the caller drains, flushes the page and notes it synced
@@ -181,12 +191,10 @@ public:
                                     [[maybe_unused]] VideoCommon::CacheType which) {}
 
     virtual void InnerInvalidation(std::span<const std::pair<DAddr, std::size_t>> sequences) {
-        // The skip keeps the texture cache: software engine writes reach images only here.
-        const auto which = Settings::values.skip_cpu_inner_invalidation.GetValue()
-                               ? VideoCommon::CacheType::TextureCache
-                               : VideoCommon::CacheType::All;
-        for (const auto& [cpu_addr, size] : sequences) {
-            InvalidateRegion(cpu_addr, size, which);
+        if (!Settings::values.skip_cpu_inner_invalidation.GetValue()) {
+            for (const auto& [cpu_addr, size] : sequences) {
+                InvalidateRegion(cpu_addr, size);
+            }
         }
     }
 

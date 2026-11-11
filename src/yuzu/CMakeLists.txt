@@ -74,6 +74,8 @@ add_executable(yuzu
     configuration/configure_general.ui
     configuration/configure_graphics.cpp
     configuration/configure_graphics.h
+    configuration/amd_fsr4_panel.cpp
+    configuration/amd_fsr4_panel.h
     configuration/nvidia_dlss_panel.cpp
     configuration/nvidia_dlss_panel.h
     configuration/configure_graphics.ui
@@ -206,6 +208,24 @@ add_executable(yuzu
     util/clickable_label.h
     util/controller_navigation.cpp
     util/controller_navigation.h
+    fritchii/fritchii.qrc
+    fritchii/fritchii_ui.cpp
+    fritchii/fritchii_ui.h
+    fritchii/home.cpp
+    fritchii/home.h
+    fritchii/game_controls.cpp
+    fritchii/game_controls.h
+    fritchii/main_window_fritchii.cpp
+    fritchii/perf_overlay.cpp
+    fritchii/perf_overlay.h
+    fritchii/precompile_gate.cpp
+    fritchii/precompile_gate.h
+    fritchii/saves_window.cpp
+    fritchii/saves_window.h
+    fritchii/whats_new.cpp
+    fritchii/whats_new.h
+    util/export_log.cpp
+    util/export_log.h
     util/limitable_input_dialog.cpp
     util/limitable_input_dialog.h
     util/overlay_dialog.cpp
@@ -250,7 +270,7 @@ add_executable(yuzu
 set_target_properties(yuzu PROPERTIES OUTPUT_NAME "OOT Remake")
 
 # Shipped next to the executable: the NX2 switches a GUI launch cannot set another way. Read at
-# startup (LoadNx2Switches in main.cpp); a user copy in %APPDATA%\eden overrides it.
+# startup (LoadNx2Switches in main.cpp); a user copy in %APPDATA%\lichii overrides it.
 add_custom_command(TARGET yuzu POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
         "${PROJECT_SOURCE_DIR}/dist/nx2_switches.txt" "$<TARGET_FILE_DIR:yuzu>/nx2_switches.txt"
@@ -282,6 +302,13 @@ file(GLOB_RECURSE THEMES ${PROJECT_SOURCE_DIR}/dist/qt_themes/*)
 if (ENABLE_UPDATE_CHECKER)
     target_compile_definitions(yuzu PUBLIC ENABLE_UPDATE_CHECKER)
 endif()
+# fritchii/ includes ui_main.h, which AutoUic already generates for main_window.cpp.
+set_source_files_properties(fritchii/fritchii_ui.cpp fritchii/main_window_fritchii.cpp
+    PROPERTIES SKIP_AUTOUIC ON)
+
+# The updater unpacks the release zip (updater/update_dialog.cpp); Export Log writes one
+# (util/export_log.cpp).
+target_link_libraries(yuzu PRIVATE QuaZip::QuaZip)
 
 if (ENABLE_QT_TRANSLATION)
     set(YUZU_QT_LANGUAGES "${PROJECT_SOURCE_DIR}/dist/languages" CACHE PATH "Path to the translation bundle for the Qt frontend")
@@ -485,4 +512,10 @@ endif()
 # Remember that the linker is incredibly stupid.
 target_link_libraries(yuzu PRIVATE OpenSSL::SSL OpenSSL::Crypto SDL3::SDL3)
 
+# NX archive conversion and editing (nx_tools.cpp) runs nxformat in the process, linked statically.
+if (TARGET nxformat::static_nozstd)
+    target_sources(yuzu PRIVATE nx_tools.h nx_tools.cpp)
+    target_link_libraries(yuzu PRIVATE nxformat::static_nozstd)
+    target_compile_definitions(yuzu PRIVATE LICHII_NX_TOOLS)
+endif()
 create_target_directory_groups(yuzu)

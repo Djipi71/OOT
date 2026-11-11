@@ -194,6 +194,8 @@ PresentManager::~PresentManager() {
 
 Frame* PresentManager::GetRenderFrame() {
 
+    // The renderer waits for the present thread (tools/nx2/critical_path.py's table).
+    Common::Nx2Timeline::Span timeline_span{"present: wait for free frame"};
     // Wait for free presentation frames
     std::unique_lock lock{free_mutex};
     free_cv.wait(lock, [this] { return !free_queue.empty(); });
@@ -213,6 +215,10 @@ void PresentManager::Present(Frame* frame) {
     if (use_present_thread) {
         scheduler.Record([this, frame](vk::CommandBuffer) {
             frame->queued_at = std::chrono::steady_clock::now();
+            // What ends the present thread's "present: wait for frame" (on the Vulkan worker).
+            if (Common::Nx2Timeline::Active()) {
+                Common::Nx2Timeline::Instant("present: frame queued", {"frame", frame->index});
+            }
             std::unique_lock lock{queue_mutex};
             present_queue.push_back(frame);
             frame_cv.notify_one();
@@ -358,7 +364,10 @@ void PresentManager::PresentThread(std::stop_token token) {
     while (!token.stop_requested()) {
         std::unique_lock lock{queue_mutex};
         // Wait for presentation frames
-        frame_cv.wait(lock, token, [this] { return !present_queue.empty(); });
+        {
+            Common::Nx2Timeline::Span timeline_span{"present: wait for frame"};
+            frame_cv.wait(lock, token, [this] { return !present_queue.empty(); });
+        }
         if (!token.stop_requested()) {
             bool held = false;
             if (present_wait_enabled) {
@@ -380,6 +389,9 @@ void PresentManager::PresentThread(std::stop_token token) {
             void(std::exchange(lock, std::unique_lock{swapchain_mutex}));
             last_present_id = 0;
             CopyToSwapchain(frame);
+            if (Common::Nx2Timeline::Active()) {
+                Common::Nx2Timeline::Instant("vkQueuePresentKHR", {"id", last_present_id});
+            }
             {
                 static std::chrono::steady_clock::time_point previous{};
                 const auto now = std::chrono::steady_clock::now();
@@ -416,7 +428,7 @@ bool PresentManager::PaceFrame(Frame* frame, std::stop_token token) {
     const bool allowed =
         (mode == VK_PRESENT_MODE_FIFO_KHR || mode == VK_PRESENT_MODE_MAILBOX_KHR ||
          mode == VK_PRESENT_MODE_FIFO_RELAXED_KHR) &&
-        !Settings::values.frame_gen.GetValue() && Settings::values.use_speed_limit.GetValue() &&
+        !Settings::FrameGenActive() && Settings::SpeedLimitEnabled() &&
         Settings::values.current_speed_mode.GetValue() != Settings::SpeedMode::Turbo;
     // The refresh rate of the display the window is on (the HWND on Windows).
     const auto& window_info = render_window.GetWindowInfo();
@@ -502,6 +514,7 @@ void PresentManager::PresentWaitThread(std::stop_token token) {
     while (!token.stop_requested()) {
         {
             std::unique_lock ql{wait_queue_mutex};
+            Common::Nx2Timeline::Span timeline_span{"present-wait: wait for work"};
             wait_queue_cv.wait(ql, token, [this] { return !wait_queue.empty(); });
             if (token.stop_requested()) {
                 return;
@@ -518,8 +531,11 @@ void PresentManager::PresentWaitThread(std::stop_token token) {
             }
             item = wait_queue.front();
         }
-        const VkResult result =
-            device.GetLogical().WaitForPresentKHR(item.swapchain, item.id, 4'000'000);
+        const VkResult result = [&] {
+            Common::Nx2Timeline::ArgSpan timeline_span{"present-wait: vkWaitForPresentKHR",
+                                                       {"id", item.id}};
+            return device.GetLogical().WaitForPresentKHR(item.swapchain, item.id, 4'000'000);
+        }();
         const auto now = std::chrono::steady_clock::now();
         wl.unlock();
         if (result == VK_TIMEOUT && now - item.submitted < std::chrono::milliseconds{500}) {

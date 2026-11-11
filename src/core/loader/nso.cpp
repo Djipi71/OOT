@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cinttypes>
 #include <cstring>
+#include <optional>
 #include <span>
 #include <vector>
 
@@ -108,35 +109,22 @@ std::optional<VAddr> AppLoader_NSO::LoadModule(Kernel::KProcess& process, Core::
         for (std::size_t i = 0; i < nso_header.segments.size(); ++i) {
             nso_file.Read(compressed_data.data(), nso_header.segments_compressed_size[i], nso_header.segments[i].offset);
             if (nso_header.IsSegmentCompressed(i)) {
-                const u32 segment_size = nso_header.segments[i].size;
                 if (nso_header.IsZBICCompressed()) {
                     // ZBIC compression
                     const int r = Common::Compression::DecompressDataZBIC(
-                        std::span<u8>{decompressed_size}.first(segment_size),
+                        std::span<u8>{decompressed_size}.first(nso_header.segments[i].size),
                         std::span<const u8>{compressed_data}.first(nso_header.segments_compressed_size[i])
                     );
-                    // A failed segment would leave the previous segment's bytes in the buffer and
-                    // boot a corrupt image that hangs without presenting; refuse to load instead.
-                    if (r <= 0) {
-                        LOG_ERROR(Loader, "{}: segment {} failed ZBIC decompression",
-                                  nso_file.GetName(), i);
-                        return std::nullopt;
-                    }
-                    if (static_cast<u32>(r) != segment_size) {
-                        LOG_WARNING(Loader, "{}: segment {} decompressed to {:#x} of {:#x} bytes",
-                                    nso_file.GetName(), i, r, segment_size);
-                        std::fill(decompressed_size.begin() + r,
-                                  decompressed_size.begin() + segment_size, u8{0});
-                    }
+                    ASSERT(r > 0);
                 } else {
                     // LZ4 compression
                     int r = Common::Compression::DecompressDataLZ4(
                         decompressed_size.data(),
-                        segment_size,
+                        nso_header.segments[i].size,
                         compressed_data.data(),
                         nso_header.segments_compressed_size[i]
                     );
-                    ASSERT(r == int(segment_size));
+                    ASSERT(r == int(nso_header.segments[i].size));
                 }
 
                 std::memcpy(
@@ -189,6 +177,16 @@ std::optional<VAddr> AppLoader_NSO::LoadModule(Kernel::KProcess& process, Core::
         pi_header = pm->PatchNSO(pi_header, name);
 
         std::copy(pi_header.begin() + sizeof(NSOHeader), pi_header.end(), patchable_section.data());
+    }
+
+    // Ocarina of Time's high refresh rate patch (Settings oot_high_refresh): where its speed scale
+    // word ended up, for the present pacing (nx2_gsv.h), and whether it applied at all.
+    constexpr u64 OcarinaOfTimeProgramId = 0x0400486024DEC000ULL;
+    const bool oot_main = name == "main" && process.GetProgramId() == OcarinaOfTimeProgramId;
+    std::optional<size_t> oot_high_refresh_scale;
+    if (oot_main) {
+        oot_high_refresh_scale = FileSys::OotHighRefreshScaleOffset(
+            std::span<const u8>{codeset.memory}.subspan(module_start));
     }
 
     // Mario Kart World selects a 1- or 2-vblank frame mode in its main loop. Force its native
@@ -343,6 +341,23 @@ std::optional<VAddr> AppLoader_NSO::LoadModule(Kernel::KProcess& process, Core::
     process.LoadModule(system.Kernel(), std::move(codeset), load_base);
     if (name == "main" && process.GetProgramId() == Settings::MarioKartWorldProgramId) {
         process.SetMkwDynamicFpsPatchApplied(mkw_dynamic_fps_patch_applied);
+    }
+    if (oot_main) {
+        const u64 scale_address =
+            oot_high_refresh_scale ? load_base + module_start + *oot_high_refresh_scale : 0;
+        process.SetOotHighRefreshScaleAddress(scale_address);
+        Settings::SetOotHighRefreshPatched(scale_address != 0);
+        // Ctrl+U switches the mode live (FileSys::SwitchOotHighRefreshLive), where its state fits.
+        const auto& data = nso_header.segments[2];
+        const u64 bss_start = u64{data.location} + data.size;
+        process.SetOotMainCodeAddress(
+            FileSys::OotHighRefreshStateInBss(bss_start, bss_start + data.bss_size)
+                ? load_base + module_start
+                : 0);
+        if (scale_address != 0) {
+            LOG_INFO(Loader, "Ocarina of Time: high refresh rate patch on, speed scale at {:#x}",
+                     scale_address);
+        }
     }
     return load_base + image_size;
 }

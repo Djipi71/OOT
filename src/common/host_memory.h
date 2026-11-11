@@ -9,6 +9,8 @@
 #include <atomic>
 #include <memory>
 #include <optional>
+#include <span>
+#include <utility>
 #include "common/common_funcs.h"
 #include "common/common_types.h"
 
@@ -62,6 +64,43 @@ public:
     /// it needs RAM. The contents stay; using the pages brings them back.
     void HintCold(size_t physical_offset, size_t length,
                   std::optional<size_t> virtual_offset) const;
+    /// Windows: resident pages of guest memory (backing and its views) that hold only zeros leave
+    /// the working set, like HintCold. Returns {resident bytes looked at, bytes trimmed}.
+    std::pair<size_t, size_t> TrimZeroPages() const;
+
+    /// The last TrimZeroPages pass's phases (2026-11-10: 10-14 ms host map/unmap/protect stalls in
+    /// kill hitches while a pass ran; which phase holds the address space): the working set query,
+    /// reading the pages, and the VirtualUnlock calls (and how many).
+    struct ZeroTrimPhases {
+        u64 query_us{};
+        u64 scan_us{};
+        u64 unlock_us{};
+        u64 unlock_runs{};
+        u64 longest_unlock_us{};
+    };
+    [[nodiscard]] static ZeroTrimPhases LastZeroTrimPhases() noexcept;
+
+    /// Bytes ClearBackingRegion has filled with zeros (memset) since start.
+    static u64 ZeroFilledBytes() noexcept;
+
+    /// Guest pages in this process's working set, from QueryWorkingSetEx on every stride-th 4 KiB
+    /// page (scaled back up): through the backing, through the guest's views of it, and view
+    /// pages whose backing page is resident too. The working set counts such a page once per
+    /// address, so the guest's real share of RAM is backing + views - both.
+    struct ResidentSample {
+        u64 backing_bytes{};     ///< Resident through the backing
+        u64 view_bytes{};        ///< Resident through the views
+        u64 both_bytes{};        ///< View pages whose backing page is resident too
+        u64 view_mapped_bytes{}; ///< What the views map (exact, not sampled)
+        u32 micros{};            ///< What the pass took
+        bool valid{};            ///< Windows, guest memory made
+    };
+    /// Windows (zeros elsewhere). Takes the views' lock to copy their ranges; touches no guest
+    /// page. Also kept for LastResidentSample.
+    ResidentSample SampleResident(size_t stride_pages = 64) const;
+    /// The last SampleResident result (zeros before the first).
+    [[nodiscard]] static ResidentSample LastResidentSample();
+
     /// Pages the kernel hands out (cleared or not).
     void MarkUsed(size_t physical_offset, size_t length);
 
@@ -70,6 +109,31 @@ public:
 
     /// A new kernel on this memory: everything a previous one used may hold data.
     void ForgetContents();
+
+    /// EDEN_NX2_SEC_RESERVE=1 (Windows, off by default): the guest memory section is created
+    /// with SEC_RESERVE instead of SEC_COMMIT, so the commit charge follows what the guest uses
+    /// instead of all of it (14 GiB) from boot. Commit commits the pages behind a range (whole
+    /// 64 KiB granules, those committed already skipped); MarkUsed (so ClearBackingRegion too)
+    /// and Map call it. A no-op without the switch.
+    void Commit(size_t physical_offset, size_t length);
+
+    /// Commits everything outside `lazy` (physical offset and length of the kernel's user pools,
+    /// whose pages are committed as they are allocated). A no-op without EDEN_NX2_SEC_RESERVE.
+    void CommitAllBut(std::span<const std::pair<size_t, size_t>> lazy);
+
+    [[nodiscard]] bool CommitsOnUse() const noexcept {
+        return commit_on_use;
+    }
+
+    /// The section's commit state, for the memory log.
+    struct CommitStats {
+        bool reserved{};        ///< EDEN_NX2_SEC_RESERVE is on
+        u64 committed_bytes{};  ///< Committed by Commit
+        u64 section_bytes{};
+        u64 net_commits{};      ///< Pages the fault handler had to commit (must stay 0)
+        u64 first_net_offset{}; ///< The first of those: backing offset, or virtual | 1 << 63
+    };
+    [[nodiscard]] static CommitStats GetCommitStats();
 
     [[nodiscard]] u8* BackingBasePointer() noexcept {
         return backing_base;
@@ -94,19 +158,6 @@ public:
     }
 
 private:
-    void Swap(HostMemory& other) noexcept;
-
-    friend class HostMemoryTestAccess;
-    struct AllocationTestControl {
-        size_t backing_size;
-        size_t virtual_size;
-        bool fail_fastmem;
-        bool fail_fallback;
-        size_t fastmem_attempts{};
-        size_t fallback_attempts{};
-    };
-    static thread_local AllocationTestControl* allocation_test_control;
-
     size_t backing_size{};
     size_t virtual_size{};
 
@@ -122,10 +173,12 @@ private:
     static constexpr size_t GranuleShift = 16; ///< 64 KiB of backing per state byte
     static constexpr u8 GranuleUsed = 1 << 0;   ///< Handed out at least once
     static constexpr u8 GranuleDirty = 1 << 1;  ///< May hold non-zero data
+    static constexpr u8 GranuleCommitted = 1 << 2; ///< EDEN_NX2_SEC_RESERVE: committed
     std::unique_ptr<std::atomic<u8>[]> granules;
     size_t num_granules{};
     // Windows requires it for kernels whom lack proper support for some functions!
     bool fallback_buffer{false};
+    bool commit_on_use{false}; ///< EDEN_NX2_SEC_RESERVE (see Commit)
 };
 
 } // namespace Common

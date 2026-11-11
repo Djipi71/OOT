@@ -167,6 +167,7 @@ struct CooperativeHmmaTypes {
     Id matrix_a{};
     Id matrix_b{};
     Id matrix_c{};
+    u32 rows{16}; ///< Rows of A and the accumulator
 };
 
 class EmitContext final : public Sirit::Module {
@@ -321,6 +322,7 @@ public:
     u32 rescaling_downfactor_member_index{};
     u32 texture_rescaling_index{};
     u32 image_rescaling_index{};
+    u32 descriptor_set{}; ///< Set of every resource of the stage (Bindings::descriptor_set)
 
     Id render_area_push_constant{};
     u32 render_are_member_index{};
@@ -362,11 +364,8 @@ public:
     Id write_global_func_u32{};
     Id write_global_func_u32x2{};
     Id write_global_func_u32x4{};
-    // 32-bit global atomics on untracked addresses, routed to the storage buffer holding them.
-    enum class GlobalAtomic : size_t {
-        IAdd, SMin, UMin, SMax, UMax, Inc, Dec, And, Or, Xor, Exchange, AddF32, Count,
-    };
-    std::array<Id, static_cast<size_t>(GlobalAtomic::Count)> global_atomic_funcs{};
+    Id atomic_add_global_func_u32{};
+    Id atomic_umax_global_func_u32{};
     Id atomic_cas_global_func_u32{};
 
     bool need_input_position_indirect{};

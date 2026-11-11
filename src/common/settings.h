@@ -65,6 +65,10 @@ SETTING(u16, false);
 SWITCHABLE(AnisotropyMode, true);
 SWITCHABLE(AntiAliasing, false);
 SWITCHABLE(OotAntiAliasing, false);
+SWITCHABLE(DlssPreset, false);
+SWITCHABLE(NvidiaDlssQuality, false);
+SWITCHABLE(OotRefreshCap, false);
+SWITCHABLE(OotMovieUpscale, false);
 SWITCHABLE(AspectRatio, true);
 SWITCHABLE(AstcDecodeMode, true);
 SWITCHABLE(AstcRecompression, true);
@@ -363,18 +367,6 @@ struct Values {
                                                   true,
                                                   true};
 
-    // Lichii: caps how often the game's own compositor presents, so the game itself is paced to
-    // this rate instead of only the display. 0 keeps the game's vblank and swap interval.
-    SwitchableSetting<u32, true> fps_limit{linkage,
-                                           0,
-                                           0,
-                                           480,
-                                           "fps_limit",
-                                           Category::Renderer,
-                                           Specialization::Countable,
-                                           true,
-                                           true};
-
     SwitchableSetting<ScalingFilter> scaling_filter{linkage,
                                                     ScalingFilter::ScaleForce,
                                                     "scaling_filter",
@@ -400,19 +392,31 @@ struct Values {
                                                            Specialization::Percentage,
                                                        true,
                                                        true};
-    // Switch 2 VSync event rate. Games start frames on it, so above 60 only games with a
-    // real-time step (e.g. the Ocarina "FPS Unlock" built-in) keep their speed.
-    SwitchableSetting<u16, true> frame_rate_limit{linkage,
-                                                  60,
-                                                  30,
-                                                  240,
-                                                  "nx2_frame_rate_limit",
-                                                  Category::Renderer,
-                                                  Specialization::Scalar,
-                                                  true,
-                                                  false};
-    // NVIDIA DLSS (through NVIDIA Streamline) in place of a game's DLSS.
-    SwitchableSetting<bool> nvidia_dlss{linkage, false, "nvidia_dlss", Category::Renderer};
+    // NVIDIA DLSS (through NVIDIA Streamline) in place of a game's DLSS. Global only: a per-game
+    // value (left in some players' OoT configs) silently overrode the checkbox, which then showed
+    // unchecked and greyed once the game ran (2026-11-09, an RTX 5080 player).
+    Setting<bool> nvidia_dlss{linkage, false, "nvidia_dlss", Category::Renderer};
+    // The DLSS model (preset) for every mode: K by default (NVIDIA's defaults for Performance and
+    // Ultra Performance drew thin lines); Default leaves the choice to NVIDIA. EDEN_NX2_DLSS_PRESET
+    // still overrides it. Applies live (Apply/OK while playing).
+    // v5.8.4: per game as well (the owner: "in game settings and not just global").
+    SwitchableSetting<DlssPreset> nvidia_dlss_preset{linkage,
+                                           DlssPreset::K,
+                                           "nvidia_dlss_preset",
+                                           Category::Renderer,
+                                           Specialization::Default,
+                                           true,
+                                           true};
+    // The DLSS mode (zortos293/Lichii#1249): Automatic picks it from the game's render and output
+    // sizes as before; an explicit mode applies when the render size fits NVIDIA's range for it.
+    // Native (DLAA) keeps the game's render size. Applies live too.
+    SwitchableSetting<NvidiaDlssQuality> nvidia_dlss_quality{linkage,
+                                                   NvidiaDlssQuality::Automatic,
+                                                   "nvidia_dlss_quality",
+                                                   Category::Renderer,
+                                                   Specialization::Default,
+                                                   true,
+                                                   true};
     SwitchableSetting<AspectRatio, true> aspect_ratio{linkage,
                                                       AspectRatio::R16_9,
                                                       "aspect_ratio",
@@ -422,16 +426,25 @@ struct Values {
                                                       true};
 
     SwitchableSetting<AntiAliasing> anti_aliasing{linkage,
-                                                  AntiAliasing::Fxaa,
+                                                  AntiAliasing::None,
                                                   "anti_aliasing",
                                                   Category::Renderer,
                                                   Specialization::Default,
                                                   true,
                                                   true};
     // The Legend of Zelda: Ocarina of Time's own anti-aliasing network and its sharpening output
-    // pass, or the tonemapped image as the game renders it (video_core/oot_network.h).
+    // pass, the tonemapped image as the game renders it (video_core/oot_network.h), or AMD FSR 3.1
+    // or FSR 4 in place of the game's upscale pass (video_core/ocarina_upscale.h; FSR 4 needs
+    // AMD's downloaded runtime and falls back to FSR 3.1). NVIDIA DLSS keeps its own setting and,
+    // when on, still replaces Game and No sharpening; an FSR choice wins over it.
     SwitchableSetting<OotAntiAliasing> oot_anti_aliasing{linkage, OotAntiAliasing::Game,
                                                          "oot_anti_aliasing", Category::Renderer};
+    // The title screen's and cutscenes' videos (AV1 1080p60): the game's own upscaler (removes
+    // banding, 1080p -> 1440p; tensor operations) or a bilinear copy. Automatic: the game's where
+    // the GPU runs tensor operations natively (RTX), the copy elsewhere (its emulated matrices
+    // cost ~33 ms a frame). EDEN_NX2_OOT_MOVIE_NETWORK=0/1 overrides it for tests.
+    SwitchableSetting<OotMovieUpscale> oot_movie_upscale{linkage, OotMovieUpscale::Automatic,
+                                                         "oot_movie_upscale", Category::Renderer};
 
     SwitchableSetting<std::string> post_shader_chain{linkage,
                                                      std::string(),
@@ -583,7 +596,8 @@ struct Values {
     // GPU-written. Its pointer carries no size, so the binding is up to 8 MiB; marking all of it
     // defers the CPU's later writes to those pages (Ocarina of Time's white leaves) and has fences
     // copy them back. Auto: the extent the shader's stores provably reach (the whole binding when
-    // unknown). Full: the whole binding (the behaviour before the store extent).
+    // unknown). Full: the whole binding (the behaviour before the store extent). Cap64K: at most
+    // 64 KiB.
     SwitchableSetting<NativeComputeWriteMark, true> native_compute_write_mark{
         linkage,
         NativeComputeWriteMark::Auto,
@@ -651,18 +665,22 @@ struct Values {
         linkage, true, "use_vulkan_driver_pipeline_cache", Category::RendererAdvanced,
         Specialization::Default};
 
-    // Precache shaders before the game starts: the compute programs in the game files and the
-    // cached graphics pipelines the boot leaves for later are built on the loading screen, so the
-    // driver's cache holds them before the game first uses them.
-    // Ask (default in OOT Remake): the desktop app asks at launch while the game has no finished
-    // precache; where nothing asks, as Off.
-    SwitchableSetting<PrecacheShaders> precache_shaders{linkage,
-                                                        PrecacheShaders::Ask,
-                                                        "precache_shaders",
-                                                        Category::RendererAdvanced,
-                                                        Specialization::Default,
-                                                        true,
-                                                        true};
+    // Graphics pipeline libraries (VK_EXT_graphics_pipeline_library): pipelines linked from
+    // per-stage shader libraries, on NVIDIA and AMD GPUs. EDEN_NX2_GPL=1 turns them on for any
+    // GPU, EDEN_NX2_GPL=0 off.
+    SwitchableSetting<bool> use_graphics_pipeline_library{
+        linkage, true, "use_graphics_pipeline_library", Category::RendererAdvanced};
+
+    // Threads of the shader warm-up (compute and graphics, each). EDEN_NX2_WARM_THREADS overrides.
+    SwitchableSetting<u32, true> shader_warm_threads{linkage,
+                                                     4,
+                                                     1,
+                                                     32,
+                                                     "shader_warm_threads",
+                                                     Category::RendererAdvanced,
+                                                     Specialization::Countable,
+                                                     true,
+                                                     true};
 
     SwitchableSetting<bool> enable_compute_pipelines{linkage, false, "enable_compute_pipelines",
                                                      Category::RendererAdvanced};
@@ -675,6 +693,28 @@ struct Values {
     // first launch (oot_fps_asked).
     SwitchableSetting<bool> oot_30fps{linkage, false, "oot_30fps", Category::RendererAdvanced};
     Setting<bool> oot_fps_asked{linkage, false, "oot_fps_asked", Category::RendererAdvanced};
+    // Ocarina of Time above 60 fps (experimental, off by default): the "High refresh rate
+    // (built-in)" patch makes the game's step always follow real time, below 1.0 too, and the
+    // present pacing (nx2_gsv.h PaceToVblank) caps it at oot_high_refresh_cap instead of 60.
+    // Ctrl+U (and this setting in Configure) switch it while the game runs, no restart
+    // (FileSys::SwitchOotHighRefreshLive); the cap applies live too. The 30 FPS mode wins.
+    SwitchableSetting<bool> oot_high_refresh{linkage,
+                                             false,
+                                             "oot_high_refresh",
+                                             Category::RendererAdvanced,
+                                             Specialization::Paired};
+    SwitchableSetting<OotRefreshCap> oot_high_refresh_cap{linkage,
+                                                          OotRefreshCap::Display,
+                                                          "oot_high_refresh_cap",
+                                                          Category::RendererAdvanced,
+                                                          Specialization::Default,
+                                                          true,
+                                                          true,
+                                                          &oot_high_refresh};
+    // Which revision of the Frizti tuned settings (common/frizti_settings.h) this config has had
+    // applied once (MainWindow::MigrateFriztiSettings; config/frizti.ini keeps it too).
+    Setting<u32> frizti_settings_revision{linkage, 0, "frizti_settings_revision",
+                                          Category::RendererAdvanced};
 
     // Mario Kart World: select a fixed or dynamic in-game frame-rate mode (loader/nso.cpp).
     SwitchableSetting<bool> mkw_30fps{linkage, false, "mkw_30fps", Category::RendererAdvanced};
@@ -788,6 +828,9 @@ struct Values {
                                                        true,
 #endif
                                                        "vertex_input_dynamic_state", Category::RendererExtensions};
+
+    SwitchableSetting<MeshShaderMode> mesh_shaders{linkage, MeshShaderMode::Automatic,
+                                                   "mesh_shaders", Category::RendererExtensions};
 
     Setting<bool> renderer_debug{linkage, false, "debug", Category::RendererDebug};
     Setting<bool> renderer_shader_feedback{linkage, false, "shader_feedback",
@@ -1031,10 +1074,31 @@ struct Values {
 
 extern Values values;
 
+struct NvidiaDlssRuntimeSettings {
+    NvidiaDlssQuality quality;
+    DlssPreset preset;
+};
+
+void RefreshNvidiaDlssRuntimeSettings();
+NvidiaDlssRuntimeSettings GetNvidiaDlssRuntimeSettings();
+
 constexpr u32 MIN_FRAME_GEN_MULTIPLIER = 2;
 constexpr u32 MAX_FRAME_GEN_MULTIPLIER = 4;
 
+/// Whether frame generation runs: the setting, and never in Fritchii builds, which hide its
+/// settings (a value left on by an older build made the camera flicker, 2026-11-09).
+[[nodiscard]] bool FrameGenActive();
 [[nodiscard]] u32 FrameGenMultiplier();
+/// Whether emulation runs at the speed limit: use_speed_limit, and in Fritchii always for Ocarina
+/// of Time, whose logic speeds up with the frame rate ("Unlocked" made the game run fast). Not
+/// while Ocarina runs with its high refresh rate patch outside the 30 FPS mode: its step follows
+/// real time then, so "Unlocked" only lifts the frame rate cap.
+[[nodiscard]] bool SpeedLimitEnabled();
+/// Set by the loader when it loads Ocarina of Time's main: whether the "High refresh rate
+/// (built-in)" patch was applied to it (Settings oot_high_refresh). Switching the mode while the
+/// game runs (Ctrl+U, FileSys::SwitchOotHighRefreshLive) sets it too.
+void SetOotHighRefreshPatched(bool patched);
+[[nodiscard]] bool OotHighRefreshPatched();
 
 [[nodiscard]] size_t FrameGenGenerations();
 

@@ -91,11 +91,24 @@ void SinkStream::AppendBuffer(SinkBuffer& buffer, std::span<s16> samples) {
     }
 }
 
+/// Blocks a sysmix stream may queue: enough for the host's largest callback plus one block.
+/// A host that asks for more than the queue holds (PipeWire's default 1024 frames against three
+/// 240-frame blocks) gets silence for the rest of every callback. The sample ring must hold the
+/// queued blocks and the one playing, at the device's channel count.
+u32 SinkStream::SysmixQueueLimit() const {
+    constexpr u64 MinimumBlocks = 3;
+    const u64 ring_blocks = SampleRingCapacity / (u64{TargetSampleCount} * device_channels) - 1;
+    const u64 request = largest_request_frames.load(std::memory_order_relaxed);
+    const u64 blocks = (request + TargetSampleCount - 1) / TargetSampleCount + 1;
+    return static_cast<u32>(std::clamp<u64>(blocks, MinimumBlocks, (std::min<u64>)(ring_blocks, 64)));
+}
+
 bool SinkStream::TryAppendOutputBlock(SinkBuffer& buffer, std::span<s16> samples) {
     if (type != StreamType::Sysmix || !IsReady() || buffer.frames != TargetSampleCount ||
         buffer.frames_played != 0 || buffer.consumed || system_channels != 2 ||
         (device_channels != 2 && device_channels != 6) ||
-        samples.size() != TargetSampleCount * system_channels || queued_buffers.load() >= 3) {
+        samples.size() != TargetSampleCount * system_channels ||
+        queued_buffers.load() >= SysmixQueueLimit()) {
         return false;
     }
     AppendBuffer(buffer, samples);
@@ -192,6 +205,20 @@ void SinkStream::ProcessAudioIn(std::span<const s16> input_buffer, std::size_t n
     }
 }
 
+RenderOutputClock& GetRenderOutputClock() {
+    static RenderOutputClock clock;
+    return clock;
+}
+
+bool RenderOutputClockEnabled() {
+    static const bool enabled = [] {
+        const char* trace = std::getenv("EDEN_NX2_VIDEO_TRACE");
+        const char* sync = std::getenv("EDEN_NX2_VIDEO_PTS_SYNC");
+        return (trace != nullptr && trace[0] != '0') || sync == nullptr || sync[0] != '0';
+    }();
+    return enabled;
+}
+
 void SinkStream::ProcessAudioOutAndRender(std::span<s16> output_buffer, std::size_t num_frames) {
     if (num_frames == 0) {
         return;
@@ -212,6 +239,12 @@ void SinkStream::ProcessAudioOutAndRender(std::span<s16> output_buffer, std::siz
         for (size_t i = 0; i < num_frames; i++)
             std::memset(&output_buffer[i * frame_size], 0, frame_size_bytes);
         return;
+    }
+
+    if (type == StreamType::Sysmix && num_frames > largest_request_frames.load()) {
+        largest_request_frames.store(num_frames);
+        LOG_INFO(Audio, "sysmix {}: host asks for {} frames per callback, queue limit {} blocks",
+                 name, num_frames, SysmixQueueLimit());
     }
 
     while (frames_written < num_frames) {
@@ -269,6 +302,13 @@ void SinkStream::ProcessAudioOutAndRender(std::span<s16> output_buffer, std::siz
         last_sample_count_update_time = system.CoreTiming().GetGlobalTimeNs();
         min_played_sample_count = max_played_sample_count;
         max_played_sample_count += actual_frames_written;
+    }
+
+    if (RenderOutputClockEnabled() && type == StreamType::Render &&
+        name == "ADSP_RenderStream-0") {
+        auto& clock = GetRenderOutputClock();
+        clock.played.fetch_add(actual_frames_written, std::memory_order_relaxed);
+        clock.starved.fetch_add(num_frames - actual_frames_written, std::memory_order_relaxed);
     }
 }
 
