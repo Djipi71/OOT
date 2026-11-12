@@ -6,6 +6,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <mutex>
+#include <new>
 
 #include <cstdlib>
 
@@ -98,9 +99,25 @@ void DeviceMemory::TrimZeroPages(std::stop_token stop) {
             }
         }
         const auto start = std::chrono::steady_clock::now();
-        Common::Nx2Hitch::ZeroTrimBegin();
-        const auto [resident, trimmed] = buffer.TrimZeroPages();
-        Common::Nx2Hitch::ZeroTrimEnd();
+        std::pair<size_t, size_t> result;
+        try {
+            Common::Nx2Hitch::ZeroTrimBegin();
+            result = buffer.TrimZeroPages();
+            Common::Nx2Hitch::ZeroTrimEnd();
+        } catch (const std::bad_alloc&) {
+            Common::Nx2Hitch::ZeroTrimEnd();
+            // A pass needs 32 MiB and more of scratch. When Windows runs out of commit, the
+            // exception leaving this thread ended the emulator (#1346); the pass is only a saving.
+            interval = std::chrono::seconds{60};
+            const Common::ProcessMemoryUsage usage = Common::GetProcessMemoryUsage();
+            LOG_WARNING(HW_Memory,
+                        "Skipped trimming all-zero guest pages: out of memory. Windows commit is "
+                        "{} of {} MiB (this process {} MiB); the limit is RAM plus the page file",
+                        usage.system_commit >> 20, usage.system_commit_limit >> 20,
+                        usage.private_bytes >> 20);
+            continue;
+        }
+        const auto [resident, trimmed] = result;
         const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                             std::chrono::steady_clock::now() - start)
                             .count();
