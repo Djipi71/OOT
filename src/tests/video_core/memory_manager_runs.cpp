@@ -62,6 +62,65 @@ public:
 
 } // namespace
 
+TEST_CASE("A 40-bit address space maps Switch 2 VA past 128 GiB", "[memory_manager]") {
+    ScopedSystemTestContext context;
+    Core::System system;
+    Core::DeviceMemory physical;
+    Tegra::MaxwellDeviceMemoryManager device_memory{physical};
+    NullRasterizer rasterizer;
+    // Nx2GpuVaEnd is 0xC000000000, so the GMMU is 40 bits. 0x2109ec0000 is the map that
+    // SIGSEGV'd PageTableOp when the tables only covered NvRm's 128 GiB range.
+    Tegra::MemoryManager memory{system, device_memory, 40, 1ULL << 34, 16};
+    memory.BindRasterizer(&rasterizer);
+
+    constexpr GPUVAddr gpu = 0x2109ec0000ULL;
+    constexpr DAddr dev = 0x1000;
+    constexpr u64 size = 0x20000;
+    memory.Map(gpu, dev, size, Tegra::PTEKind::PITCH, false);
+    REQUIRE(memory.GpuToCpuAddress(gpu) == dev);
+    REQUIRE(memory.GpuToCpuAddress(gpu + size - 1) == dev + size - 1);
+
+    constexpr GPUVAddr past_end = 1ULL << 40;
+    memory.Map(past_end, dev, size, Tegra::PTEKind::PITCH, false);
+    REQUIRE_FALSE(memory.GpuToCpuAddress(past_end).has_value());
+
+    // A map that starts on the last valid page and crosses the end must not replace that page.
+    constexpr GPUVAddr last_page = past_end - 0x1000;
+    constexpr DAddr last_dev = 0x3000;
+    memory.Map(last_page, last_dev, 0x1000, Tegra::PTEKind::PITCH, false);
+    REQUIRE(memory.GpuToCpuAddress(last_page) == last_dev);
+    memory.Map(last_page, last_dev + 0x1000, 0x2000, Tegra::PTEKind::PITCH, false);
+    REQUIRE(memory.GpuToCpuAddress(last_page) == last_dev);
+    // Unmap refuses the same crossing range, so the page stays mapped. A destroy that
+    // released backing after this would free memory the page table still points at.
+    memory.Unmap(last_page, 0x2000);
+    REQUIRE(memory.GpuToCpuAddress(last_page) == last_dev);
+}
+
+TEST_CASE("Device space freed and mapped again every frame stays in place", "[memory_manager]") {
+    Core::DeviceMemory physical;
+    Tegra::MaxwellDeviceMemoryManager device_memory{physical};
+    // The Yoshi demo frees a 1.5 MiB range and maps it again each frame. The free runs on the GPU
+    // thread, so the next frame's allocation can come first.
+    constexpr size_t size = 0x180000;
+    DAddr previous = device_memory.Allocate(size);
+    const DAddr lowest = previous;
+    DAddr highest = previous;
+    for (int frame = 0; frame < 1000; ++frame) {
+        const DAddr next = device_memory.Allocate(size);
+        device_memory.Free(previous, size);
+        previous = next;
+        highest = std::max(highest, next);
+    }
+    REQUIRE(highest - lowest <= 2 * size);
+
+    // Another size doesn't take the freed block.
+    const DAddr other = device_memory.Allocate(0x20000);
+    REQUIRE(other > highest);
+    device_memory.Free(previous, size);
+    REQUIRE(device_memory.Allocate(size) == previous);
+}
+
 TEST_CASE("MaxContinuousRange from the mapping runs matches the page walk", "[memory_manager]") {
     REQUIRE(VideoCommon::Nx2Perf::Enabled());
     const u64 big_page_bits = GENERATE(16ULL, 17ULL);
