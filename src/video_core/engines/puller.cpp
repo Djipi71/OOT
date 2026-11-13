@@ -857,6 +857,10 @@ static bool ReleaseFencesForReadable(DmaPusher& dma_pusher, const void* owner,
     return met_there;
 }
 
+Puller::~Puller() {
+    Nx2SemaphoreWaiters::Get().Remove(this);
+}
+
 bool Puller::PendingAcquire::Matches(u32 current) const {
     switch (static_cast<GpuSemaphoreOperation>(operation)) {
     case GpuSemaphoreOperation::AcquireEqual:
