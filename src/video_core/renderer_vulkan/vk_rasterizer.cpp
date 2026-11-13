@@ -2772,7 +2772,7 @@ void RasterizerVulkan::InnerInvalidation(std::span<const std::pair<DAddr, std::s
         // As OnCacheInvalidations: out of the GPU-written ranges first.
         buffer_cache.ClaimCpuWrites(sequences);
         for (const auto& [addr, size] : sequences) {
-            buffer_cache.WriteMemory(addr, size, true, true);
+            buffer_cache.WriteMemory(addr, size);
         }
     }
     if (any(query_cache.page_filter)) {
